@@ -1,0 +1,28 @@
+# IDEA 本地开发 profile：内置全部依赖地址，无需配置环境变量
+# 使用：Run Configuration 的 VM 参数加 -Dspring.profiles.active=idea
+# 前提依赖（全部复用 qc-robot 平台栈 root-manager-platform-run/infrastructure）：
+#   1. PG 容器：robot-postgres（127.0.0.1:55432，robot_user/robot_password，库 scheduler_service）
+#   2. Redis：robot-redis（127.0.0.1:6379）
+#   3. RMS：robot-management-service-local 容器（127.0.0.1:18083）
+server:
+  port: 8091
+
+spring:
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:55432/scheduler_service?stringtype=unspecified
+    username: robot_user
+    password: robot_password
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+
+robot:
+  scheduler:
+    map:
+      metadata-path: ${MAP_METADATA_PATH:D:/robotscheduler/robot-scheduler/local-map/map_info.json}
+      pgm-path: ${MAP_PGM_PATH:D:/robotscheduler/robot-scheduler/local-map/global_map.pgm}
+      yaml-path: ${MAP_YAML_PATH:D:/robotscheduler/robot-scheduler/local-map/global_map.yaml}
+    rms:
+      base-url: http://127.0.0.1:18083
+      fleet-name: RG_20260407_00001

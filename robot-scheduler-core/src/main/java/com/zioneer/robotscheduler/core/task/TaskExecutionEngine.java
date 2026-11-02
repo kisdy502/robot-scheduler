@@ -1,0 +1,1330 @@
+package com.zioneer.robotscheduler.core.task;
+
+import com.zioneer.robotscheduler.common.scheduler.task.TaskCategories;
+import com.zioneer.robotscheduler.core.fleet.RobotCommandExecutor;
+import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
+import com.zioneer.robotscheduler.core.map.MapManager;
+import com.zioneer.robotscheduler.core.map.WaypointMetadata;
+import com.zioneer.robotscheduler.core.repository.TaskRecord;
+import com.zioneer.robotscheduler.core.traffic.TrafficRegistry;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 内核任务执行引擎：受理 → 排队（per-robot 串行）→ 执行（导航 + 动作）→ 终态事件。
+ *
+ * <p>事件契约（SchedulerEventBus → TaskStateMirror）：
+ * queued（受理，含 schedulerRequestId 回填记录）→ underway → completed / failed；
+ * 取消：执行中任务 = completed + cancellation 标记 + 机器人 stop（fork 语义）；排队任务 = canceled。</p>
+ *
+ * <p>执行策略（对齐旧栈）：
+ * 机器人就绪等待（dispatchable，30s 上限）→ 交通占用（整路径 tryAcquire，失败重试 3 次）→
+ * 导航（只发目标点，回执等待超时 = ETA*2 + 60s）→ 动作（回执等待默认 300s，参数 action_timeout_seconds 覆盖）→
+ * 终态后释放交通占用。</p>
+ */
+@Slf4j
+@Component
+public class TaskExecutionEngine {
+
+    /** 机器人就绪等待上限（秒，测试可注入缩短）。 */
+    long robotReadyTimeoutSeconds = 30;
+
+    /** 交通占用重试次数与间隔。 */
+    private static final int TRAFFIC_RETRY_TIMES = 3;
+    private static final long TRAFFIC_RETRY_INTERVAL_SECONDS = 2;
+
+    /** 交通等待上限（秒）：冲突时持续等待资源释放，超时才判失败。 */
+    private static final long TRAFFIC_WAIT_LIMIT_SECONDS = 300;
+
+    /** 交通等待过程事件间隔（毫秒）：长等待必须有可见性，不能 5 分钟黑箱。 */
+    private static final long TRAFFIC_WAIT_EVENT_INTERVAL_MILLIS = 30_000;
+
+    /** 导航回执超时基础值（秒，测试可注入缩短；兼作段超时余量）。 */
+    long navigationTimeoutBaseSeconds = 60;
+
+    /** 段超时估算的保守速度（m/s，测试可注入放大以缩短超时）。 */
+    double segmentConservativeSpeedMps = 0.2;
+
+    /** 到达位置偏差阈值（米）：超过视为地图疑似不一致（调度与机器人坐标系错位）。
+     *  容差需覆盖到位精度（真错位通常是数十米级整体漂移）。 */
+    double mapMismatchThresholdMeters = 3.0;
+
+    /** 到达偏差复核次数：状态帧/位置上报滞后回执数秒（实测 6.6m ≈ 7s 滞后），单次采样会误杀
+     *  正常到达；超阈值后按间隔重采样，持续超阈才判定地图不一致。 */
+    int arrivalConfirmAttempts = 3;
+
+    /** 到达偏差复核采样间隔（毫秒，对齐状态轮询 1Hz；测试可注入缩短）。 */
+    long arrivalConfirmIntervalMillis = 1000;
+
+    /** 动作回执默认超时（秒，测试可注入缩短）。 */
+    long actionTimeoutDefaultSeconds = 300;
+
+    private final RobotCommandExecutor commandExecutor;
+    private final TrafficRegistry trafficRegistry;
+    private final MapManager mapManager;
+    private final com.zioneer.robotscheduler.core.fleet.FleetStateMirror fleetStateMirror;
+    private final com.zioneer.robotscheduler.core.event.SchedulerEventBus eventBus;
+    private final com.zioneer.robotscheduler.core.assign.TaskAssigner taskAssigner;
+    private final com.zioneer.robotscheduler.core.assign.TaskAssignProperties assignProperties;
+    private final com.zioneer.robotscheduler.core.traffic.WaitIntentRegistry waitIntents;
+    private final com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry routeRegistry;
+    private final com.zioneer.robotscheduler.core.fleet.RobotEventMonitor eventMonitor;
+
+    /** 每机器人执行信号量（同机任务串行）。 */
+    private final Map<String, Semaphore> robotSemaphores = new ConcurrentHashMap<>();
+
+    /** kernelTaskId → 执行状态（取消判定用）。 */
+    private final Map<String, KernelTaskState> taskStates = new ConcurrentHashMap<>();
+
+    /** 等待自动分配的任务（无 robot_code 的 dispatch 请求）。 */
+    private final Map<String, PendingAssignment> pendingAssignments = new ConcurrentHashMap<>();
+
+    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+
+    public TaskExecutionEngine(RobotCommandExecutor commandExecutor, TrafficRegistry trafficRegistry,
+                               MapManager mapManager,
+                               com.zioneer.robotscheduler.core.fleet.FleetStateMirror fleetStateMirror,
+                               com.zioneer.robotscheduler.core.event.SchedulerEventBus eventBus,
+                               com.zioneer.robotscheduler.core.assign.TaskAssigner taskAssigner,
+                               com.zioneer.robotscheduler.core.assign.TaskAssignProperties assignProperties,
+                               com.zioneer.robotscheduler.core.traffic.WaitIntentRegistry waitIntents,
+                               com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry routeRegistry,
+                               com.zioneer.robotscheduler.core.fleet.RobotEventMonitor eventMonitor) {
+        this.commandExecutor = commandExecutor;
+        this.trafficRegistry = trafficRegistry;
+        this.mapManager = mapManager;
+        this.fleetStateMirror = fleetStateMirror;
+        this.eventBus = eventBus;
+        this.taskAssigner = taskAssigner;
+        this.assignProperties = assignProperties;
+        this.waitIntents = waitIntents;
+        this.routeRegistry = routeRegistry;
+        this.eventMonitor = eventMonitor;
+    }
+
+    /**
+     * 受理任务：生成内核任务 ID，发布 queued 事件（异步），返回 kernelTaskId（即对外 rmf_task_id）。
+     */
+    public String submit(TaskRecord record, String robotCode, TaskGoal goal) {
+        String kernelTaskId = generateKernelTaskId(record);
+        taskStates.put(kernelTaskId, new KernelTaskState(record.getSchedulerRequestId(), robotCode,
+                goal, ExecutionPhase.QUEUED));
+        // queued 事件异步发布：保证 dispatch 响应先以 published 语义返回（旧栈回执链路行为）
+        executor.submit(() -> {
+            publishState(kernelTaskId, "queued", record, robotCode, goal, null);
+            execute(kernelTaskId);
+        });
+        return kernelTaskId;
+    }
+
+    /**
+     * 受理自动分配任务（无指定机器人）：登记 pending 队列并立即尝试分配；
+     * 无可用机器人时保持排队（AssignmentScanner 周期重试，超时 failed）。
+     */
+    public String submitForAutoAssign(TaskRecord record, TaskGoal goal, String fleetName, String robotGroup) {
+        String kernelTaskId = generateKernelTaskId(record);
+        taskStates.put(kernelTaskId, new KernelTaskState(record.getSchedulerRequestId(), null,
+                goal, ExecutionPhase.QUEUED));
+        long deadline = System.currentTimeMillis() + assignProperties.getAssignmentTimeoutSeconds() * 1000;
+        pendingAssignments.put(kernelTaskId, new PendingAssignment(kernelTaskId, record, goal,
+                fleetName, robotGroup, deadline));
+        executor.submit(() -> publishState(kernelTaskId, "queued", record, null, goal, null));
+        tryAssignOnce(kernelTaskId);
+        return kernelTaskId;
+    }
+
+    /**
+     * 自动分配扫描（周期 5s）：重试 pending 任务分配；超时发布 failed。
+     */
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 5000)
+    public void retryPendingAssignments() {
+        long now = System.currentTimeMillis();
+        for (PendingAssignment pending : pendingAssignments.values()) {
+            KernelTaskState state = taskStates.get(pending.kernelTaskId());
+            if (state == null) {
+                // 已取消
+                pendingAssignments.remove(pending.kernelTaskId());
+                continue;
+            }
+            if (now > pending.deadlineMillis()) {
+                pendingAssignments.remove(pending.kernelTaskId());
+                taskStates.remove(pending.kernelTaskId());
+                publishRaw(pending.kernelTaskId(), pending.record(), null, pending.goal(),
+                        "failed", null, "自动分配超时：无可用机器人在 "
+                                + assignProperties.getAssignmentTimeoutSeconds() + "s 内");
+                log.warn("自动分配超时失败: task={} 无可用机器人在 {}s 内",
+                        pending.kernelTaskId(), assignProperties.getAssignmentTimeoutSeconds());
+                continue;
+            }
+            tryAssignOnce(pending.kernelTaskId());
+        }
+    }
+
+    private void tryAssignOnce(String kernelTaskId) {
+        PendingAssignment pending = pendingAssignments.get(kernelTaskId);
+        if (pending == null) {
+            return;
+        }
+        var decision = taskAssigner.selectWithTrace(pending.goal(), pending.fleetName(), pending.robotGroup());
+        if (decision.selected().isEmpty()) {
+            return;
+        }
+        String robotCode = decision.selected().get().robotCode();
+        pendingAssignments.remove(kernelTaskId);
+        KernelTaskState state = taskStates.get(kernelTaskId);
+        if (state == null) {
+            return;
+        }
+        state.assignRobot(robotCode);
+        state.setAssignmentTrace(decision.traceJson());
+        log.info("任务自动分配: task={} robot={} score={}", kernelTaskId, robotCode, decision.summary());
+        // 分配透明化：发布带评分明细的 queued 事件（robot 已定，等待就绪）
+        publishRaw(kernelTaskId, pending.record(), robotCode, pending.goal(), "queued",
+                null, decision.summary(), Map.of("assignment_trace", decision.traceJson()));
+        // 立即占用机器人：同步置 running（不等下一帧状态刷新），
+        // 防止并发提交的后续任务因 mode 仍为 idle 而堆给同一台；
+        // 不动 dispatchable（执行链路 waitForRobotReady 依赖它，FleetManager 帧刷新会正常维护）
+        fleetStateMirror.list().stream()
+                .filter(robot -> robotCode.equals(robot.getRobotCode()))
+                .findFirst()
+                .ifPresent(robot -> {
+                    robot.setMode("running");
+                    fleetStateMirror.upsert(robot);
+                });
+        executor.submit(() -> execute(kernelTaskId));
+    }
+
+    /**
+     * 取消任务：排队中 → canceled；执行中 → 机器人 stop + completed + cancellation（fork 语义）；
+     * 内核态不存在（调度重启丢失的孤儿记录）→ 止损取消（发 stop + 发布终态，避免记录永久挂起）。
+     */
+    public boolean cancel(String kernelTaskId, TaskRecord record, String robotCode, String reason) {
+        KernelTaskState state = taskStates.get(kernelTaskId);
+        if (state == null) {
+            return cancelOrphan(kernelTaskId, record, robotCode, reason);
+        }
+        if (state.phase() == ExecutionPhase.DONE) {
+            return false;
+        }
+        pendingAssignments.remove(kernelTaskId);
+        if (state.phase() == ExecutionPhase.QUEUED) {
+            state.markCanceled();
+            taskStates.remove(kernelTaskId);
+            publishRaw(kernelTaskId, record, robotCode, state.goal(), "canceled", null, "排队任务取消");
+            log.info("排队任务已取消: task={} robot={}", kernelTaskId, robotCode);
+            return true;
+        }
+        // 执行中：标记取消，执行线程在下个检查点停止
+        state.markCanceled();
+        routeRegistry.clear(robotCode);
+        if (robotCode != null) {
+            commandExecutor.abandon(robotCode, "任务取消");
+            // stop 不带 body_task_id（实测契约：带未知 task_id 会被 RMS 拒 10000，静默失败导致本体注册表残留，
+            // 后续任务被 BODY_ADD_TASK_REJECTED 拒绝）；null = 停止当前活动任务
+            commandExecutor.stop(robotCode, 0, null);
+        }
+        Map<String, Object> cancellation = new LinkedHashMap<>();
+        cancellation.put("labels", List.of("source=robot_scheduler", "reason=" + (reason == null ? "unspecified" : reason)));
+        publishRaw(kernelTaskId, record, robotCode, state.goal(), "completed", cancellation, "任务取消（fork 语义）",
+                terminalDetail(state, Map.of()));
+        log.info("执行中任务已取消（fork 语义 completed+cancellation）: task={} robot={}", kernelTaskId, robotCode);
+        taskStates.remove(kernelTaskId);
+        return true;
+    }
+
+    /**
+     * 孤儿任务取消：调度重启导致内核态丢失、DB 记录仍挂非终态（表现：取消请求永远 cancel_requested）。
+     * 机器人侧若有残留任务一并 stop 止损（stop 不带 body_task_id，本体无任务时 RMS 回 task not found，无害）。
+     */
+    private boolean cancelOrphan(String kernelTaskId, TaskRecord record, String robotCode, String reason) {
+        String robot = robotCode != null && !robotCode.isBlank() ? robotCode
+                : (record == null ? null : record.getRobotCode());
+        if (robot != null && !robot.isBlank()) {
+            commandExecutor.abandon(robot, "任务取消（孤儿止损）");
+            commandExecutor.stop(robot, 0, null);
+        }
+        Map<String, Object> cancellation = new LinkedHashMap<>();
+        cancellation.put("labels", List.of("source=robot_scheduler",
+                "reason=" + (reason == null ? "unspecified" : reason)));
+        publishRaw(kernelTaskId, record, robot, null, "completed", cancellation,
+                "任务取消（调度重启后孤儿任务，fork 语义）");
+        log.info("孤儿任务已取消（内核态已随重启丢失，仅记录止损）: task={} robot={}", kernelTaskId, robot);
+        return true;
+    }
+
+    private void execute(String kernelTaskId) {
+        KernelTaskState state = taskStates.get(kernelTaskId);
+        if (state == null) {
+            return;
+        }
+        String robotCode = state.robotCode();
+        Semaphore semaphore = robotSemaphores.computeIfAbsent(robotCode, k -> new Semaphore(1));
+        try {
+            // 同机串行：排队等待期间任务保持 queued
+            if (!semaphore.tryAcquire(robotReadyTimeoutSeconds * 3, TimeUnit.SECONDS)) {
+                publishTerminal(kernelTaskId, state, "failed",
+                        "机器人 " + robotCode + " 执行队列繁忙超时（同机排队任务过多）");
+                return;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        try {
+            if (state.isCanceled() || taskStates.get(kernelTaskId) == null) {
+                return;
+            }
+            if (!waitForRobotReady(robotCode, state)) {
+                String reason = fleetStateMirror.list().stream()
+                        .filter(r -> robotCode.equals(r.getRobotCode()))
+                        .findFirst()
+                        .map(r -> {
+                            if (Boolean.TRUE.equals(r.getDecommissioned())) {
+                                return "机器人已停用（decommissioned），不参与调度";
+                            }
+                            if (!r.isOnline()) {
+                                return "机器人离线（状态帧超时，检查 RMS 连接）";
+                            }
+                            // 确定性根因优先（配置级问题不会 30s 自愈）：
+                            // mode=running 可能是本任务自身造成的（受理事件即置 running），不能当根因
+                            String activeMap = mapManager.activeMetadata()
+                                    .map(m -> m.getMapName()).orElse(null);
+                            if (activeMap != null && r.getSlamMapCode() != null
+                                    && !activeMap.equals(r.getSlamMapCode())) {
+                                return "机器人地图与调度不一致（机器人: " + r.getSlamMapCode()
+                                        + " vs 调度: " + activeMap + "），已禁止派发";
+                            }
+                            if ("paused".equals(r.getMode()) || "error".equals(r.getMode())
+                                    || "unknown".equals(r.getMode())) {
+                                return "机器人状态异常（mode=" + r.getMode() + "）";
+                            }
+                            if ("charging".equals(r.getMode())) {
+                                return "机器人充电中，暂不可派发";
+                            }
+                            if ("running".equals(r.getMode())) {
+                                return "机器人忙碌（外部任务执行中/移动中）";
+                            }
+                            return "机器人离图（位置无法吸附到地图拓扑，临时不可派发；回到图上自动恢复）";
+                        })
+                        .orElse("机器人不可见（车队镜像无此机器人）");
+                publishTerminal(kernelTaskId, state, "failed",
+                        "机器人 " + robotCode + " 不可派发（" + reason + "），等待超时 "
+                                + robotReadyTimeoutSeconds + "s");
+                return;
+            }
+            // underway 事件保留分配评分明细（mirror 只存最新事件，trace 需随状态迁移携带）
+            Map<String, Object> underwayDetail = state.assignmentTrace() == null
+                    ? Map.of() : Map.of("assignment_trace", state.assignmentTrace());
+            publishRaw(kernelTaskId, null, robotCode, state.goal(), "underway", null,
+                    "开始执行", underwayDetail);
+            state.markRunning();
+            executeGoal(kernelTaskId, state, robotCode);
+        } finally {
+            semaphore.release();
+        }
+    }
+
+    private void executeGoal(String kernelTaskId, KernelTaskState state, String robotCode) {
+        TaskGoal goal = state.goal();
+        try {
+            if (goal.requiresNavigation()) {
+                WaypointMetadata target = resolveWaypoint(goal);
+                if (target == null) {
+                    publishTerminal(kernelTaskId, state, "failed",
+                            "目标点位不存在: " + goal.goalWaypointId());
+                    return;
+                }
+                // 充电位被其他机器人驻留占用 → 自动改派最近空闲充电位（9 桩场景不该死等一桩 5 分钟）
+                if (TaskCategories.CHARGE.equals(goal.category())) {
+                    var swapped = swapChargeTargetIfBlocked(kernelTaskId, state, robotCode, goal, target);
+                    if (swapped != null) {
+                        goal = swapped;
+                        target = resolveWaypoint(goal);
+                    }
+                }
+                NavigationLease lease = acquireTraffic(kernelTaskId, state, robotCode, target);
+                if (lease == null) {
+                    // 精准失败原因：区分目标点被驻留占用 vs 路径资源长期被占
+                    String blockedDetail = describeTrafficBlock(robotCode, target);
+                    publishTerminal(kernelTaskId, state, "failed",
+                            "交通资源占用失败（等待 " + TRAFFIC_WAIT_LIMIT_SECONDS + "s 超时）: " + blockedDetail);
+                    return;
+                }
+                // 活动路线登记（可视化数据源）+ 任务审计（终态事件 detail.route_waypoints）
+                // 路线随整个任务存活（终态清除）：作业/充电阶段机器人仍坐在目标环上
+                routeRegistry.register(robotCode, kernelTaskId, resolveFloorId(goal), lease.routeWaypointIds());
+                state.setRouteWaypointIds(lease.routeWaypointIds());
+                try {
+                    if (!navigateBySegments(kernelTaskId, state, robotCode, goal, lease, target)) {
+                        return;
+                    }
+                } finally {
+                    trafficRegistry.releaseAll(robotCode);
+                }
+            }
+            if (goal.requiresAction()) {
+                long timeoutSeconds = actionTimeoutSeconds(goal);
+                Map<String, Object> description = buildDescription(kernelTaskId, goal, null);
+                // 充电前已在充的场景（任务发起时机器人就在桩上充电）：直接接管等待，
+                // 不再发 start-activity（契约：本体仅认 start-activity 触发充电，is_charging=true
+                // 只可能是任务前已在充；不在充电位上的 is_charging = 异常状态 → 止损）
+                if (TaskCategories.CHARGE.equals(goal.category()) && isBodyCharging(robotCode)) {
+                    if (!onChargeWaypoint(robotCode)) {
+                        failPrematureCharging(kernelTaskId, state, robotCode, goal);
+                        return;
+                    }
+                    completeByBodyAutoCharge(kernelTaskId, state, robotCode, goal, timeoutSeconds);
+                    return;
+                }
+                // 动作阶段可见性：不发事件的话状态停留在最后一条导航消息（stale），看不出在等动作回执
+                publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                        "开始" + zhAction(goal.action()) + "（回执等待最长 "
+                                + (timeoutSeconds >= 3600 ? timeoutSeconds / 3600 + "h" : timeoutSeconds + "s") + "）",
+                        withAssignmentTrace(state, Map.of()));
+                RobotCommandExecutor.CommandHandle handle = commandExecutor.submitActivity(
+                        robotCode, goal.action(), goal.actionLabel(), description);
+                RobotCommandExecutor.CommandResult result = await(handle, timeoutSeconds,
+                        kernelTaskId, robotCode, "动作 " + goal.action());
+                // 本体忙拒绝恢复（动作命令同样可能撞在途任务）
+                if (!result.completed() && isBodyBusyReject(result.detail())) {
+                    recoverFromBodyBusy(robotCode, "动作 " + goal.action(), result.detail());
+                    handle = commandExecutor.submitActivity(
+                            robotCode, goal.action(), goal.actionLabel(), description);
+                    result = await(handle, timeoutSeconds,
+                            kernelTaskId, robotCode, "动作(重试) " + goal.action());
+                }
+                Map<String, Object> extraDetail = new HashMap<>();
+                if (result.receipt() != null && !result.receipt().isEmpty()) {
+                    extraDetail.put("action_receipt", result.receipt());
+                    // 质检结果提取（机器人回执 raw_result.data 里的业务数据）
+                    Object rawResult = result.receipt().get("raw_result");
+                    if (rawResult instanceof Map<?, ?> rawMap) {
+                        Object data = rawMap.get("data");
+                        if (data != null) {
+                            extraDetail.put("inspection_result", data);
+                        }
+                    }
+                }
+                if (!result.completed()) {
+                    if (state.isCanceled()) {
+                        return;
+                    }
+                    publishTerminal(kernelTaskId, state, "failed",
+                            "业务动作未完成 [" + goal.action() + "]: " + safeDetail(result.detail()),
+                            extraDetail);
+                    return;
+                }
+                // 动作成功：若配置了停靠等待点（parameters.end_point），先让出作业点再完成
+                if (goal.requiresStandby() && !state.isCanceled()) {
+                    String standbyMsg = navigateToStandby(kernelTaskId, state, robotCode, goal);
+                    if (standbyMsg == null) {
+                        // 停靠失败：任务仍算完成（质检已成功），仅停靠段告警
+                        extraDetail.put("standby_warning", "质检完成但停靠点导航失败");
+                    } else {
+                        extraDetail.put("standby_waypoint", goal.standbyWaypointId());
+                    }
+                }
+                // 发布携带回执明细的 completed 事件（质检结果供上层/观测页读取）
+                taskStates.remove(kernelTaskId);
+                routeRegistry.clear(robotCode);
+                publishRaw(kernelTaskId, null, robotCode, goal, "completed", null,
+                        "动作完成: " + goal.action()
+                                + (goal.requiresStandby() ? "，已停靠 " + goal.standbyWaypointId() : ""),
+                        terminalDetail(state, extraDetail));
+                log.info("任务完成: task={} robot={} category={} receipt={}", kernelTaskId, robotCode,
+                        goal.category(), result.receipt() == null ? "无" : "已携带");
+                return;
+            }
+            if (state.isCanceled()) {
+                return;
+            }
+            taskStates.remove(kernelTaskId);
+            routeRegistry.clear(robotCode);
+            publishRaw(kernelTaskId, null, robotCode, goal, "completed", null, null,
+                    terminalDetail(state, Map.of()));
+            log.info("任务完成: task={} robot={} category={}", kernelTaskId, robotCode, goal.category());
+        } catch (Exception e) {
+            log.error("任务执行异常: task={} robot={}", kernelTaskId, robotCode, e);
+            trafficRegistry.releaseAll(robotCode);
+            routeRegistry.clear(robotCode);
+            taskStates.remove(kernelTaskId);
+            // 兜底异常中文化（JGraphT 等三方异常对用户不友好）
+            String friendlyMessage = e instanceof IllegalArgumentException
+                    ? "路径规划异常（起点/终点不可用），请检查机器人位置与目标点位"
+                    : "任务执行异常: " + e.getMessage();
+            publishRaw(kernelTaskId, null, robotCode, goal, "failed", null, friendlyMessage,
+                    terminalDetail(state, Map.of()));
+        }
+    }
+
+    /**
+     * 分段导航（对齐旧 RMF 行为）：按规划路径途经点逐段下发 navigate，
+     * 每段到达后释放身后资源并继续下一段，直到最终目标点。
+     * 长路径拆段可规避机器人导航栈的单次目标过远问题。
+     *
+     * @return true 表示已到达最终目标点；false 表示失败/取消（终态已发布或由取消链路发布）
+     */
+    private boolean navigateBySegments(String kernelTaskId, KernelTaskState state, String robotCode,
+                                       TaskGoal goal, NavigationLease lease, WaypointMetadata target) {
+        String floorId = resolveFloorId(goal);
+        // 路径途经点（含起点）；无图/吸附失败时退化为单段直达
+        List<String> routeWaypoints = lease.routeWaypointIds().isEmpty()
+                ? List.of(target.getId())
+                : lease.routeWaypointIds();
+        List<com.zioneer.robotscheduler.core.routing.NavigationRoute.Segment> segments =
+                lease.segments();
+        String currentWaypoint = routeWaypoints.get(0);
+        for (int i = 1; i < routeWaypoints.size(); i++) {
+            String next = routeWaypoints.get(i);
+            WaypointMetadata waypoint = mapManager.activeGraph()
+                    .flatMap(graph -> graph.waypoint(floorId, next))
+                    .orElse(null);
+            if (waypoint == null) {
+                publishTerminal(kernelTaskId, state, "failed", "路径途经点不存在: " + next);
+                return false;
+            }
+            Map<String, Object> description = buildDescription(kernelTaskId, goal, next,
+                    // 充电任务全程不带模板标记：本体对带标记任务会自充且行为不稳定（收到即充/到点才充
+                    // 两种表现），导航统一为纯移动；到位后走 start-activity 显式充电（旧栈验证过的契约）
+                    !TaskCategories.CHARGE.equals(goal.category()));
+            double timeoutSeconds = segmentTimeoutSeconds(segments, i - 1, waypoint, target);
+            Double speedLimit = segments.get(i - 1).maxSpeedMetersPerSecond();
+            // 段前复检（动态冲突防护）：全路线租约申请时世界是旧的——申请后外部移动的车、
+            // 失联僵尸车、新驻留的车可能落在"下一段终点/路段"上。发车前复核，被占则原地等待让行，
+            // 防止按过期租约放车直接穿过别人的车身（压测实测：静止车停在途经点上被直接穿越）
+            if (!awaitSegmentEntryClear(kernelTaskId, state, robotCode, currentWaypoint, next,
+                    segments == null ? null : segments.get(i - 1).id())) {
+                return false;
+            }
+            RobotCommandExecutor.CommandHandle handle = commandExecutor.submitNavigation(
+                    robotCode, floorId, waypoint.getX(), waypoint.getY(), waypoint.getTheta(),
+                    speedLimit, description);
+            RobotCommandExecutor.CommandResult result = awaitChargeAware(handle, timeoutSeconds,
+                    kernelTaskId, robotCode, "导航段 " + currentWaypoint + "->" + next, state);
+            // 本体忙拒绝恢复：stop 清除卡死的在途任务后重试一次（真机任务完成不自动关闭的场景）
+            if (!result.completed() && isBodyBusyReject(result.detail())) {
+                recoverFromBodyBusy(robotCode, "导航段 " + currentWaypoint + "->" + next, result.detail());
+                handle = commandExecutor.submitNavigation(
+                        robotCode, floorId, waypoint.getX(), waypoint.getY(), waypoint.getTheta(),
+                        speedLimit, description);
+                result = awaitChargeAware(handle, timeoutSeconds,
+                        kernelTaskId, robotCode, "导航段(重试) " + currentWaypoint + "->" + next, state);
+            }
+            // 本体自动充电兜底接管（兼容路径）：部分本体到位后自行开始充电（is_charging=true，回执不再来），
+            // 检测到时若已在充电位上则跳过剩余导航段，交给动作阶段接管等待。
+            // 防御：不在充电位上的 is_charging = 本体提前自充（未校验点位类型）→ 止损
+            if (TaskCategories.CHARGE.equals(goal.category()) && isBodyCharging(robotCode)) {
+                if (!onChargeWaypoint(robotCode)) {
+                    failPrematureCharging(kernelTaskId, state, robotCode, goal);
+                    return false;
+                }
+                publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                        "本体已自动开始充电，调度接管充电阶段（剩余导航段跳过）",
+                        withAssignmentTrace(state, Map.of()));
+                return true;
+            }
+            if (!result.completed()) {
+                if (state.isCanceled()) {
+                    return false;
+                }
+                publishTerminal(kernelTaskId, state, "failed",
+                        "导航分段未完成 [" + currentWaypoint + "->" + next + "]: "
+                                + safeDetail(result.detail()));
+                return false;
+            }
+            if (state.isCanceled()) {
+                return false;
+            }
+            // 到达位置校验（地图不一致行为检测）：回执完成时机器人应位于本段目标点附近。
+            // 状态帧可能滞后回执数秒（实测偏差 6.6m = 位置帧落后 7s），单次采样会误杀正常到达，
+            // 超阈值后复核重采样；持续超阈 = 调度与机器人坐标系错位（如加载同名不同版地图）→ 止损
+            double deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next);
+            if (deviation > mapMismatchThresholdMeters) {
+                String detail = String.format(
+                        "到达 %s 后上报位置持续偏差 %.1fm（目标 (%.1f,%.1f)，实际 (%.1f,%.1f)），疑似调度与机器人地图不一致，请检查机器人 SLAM 地图与调度激活地图（%s）",
+                        next, deviation, waypoint.getX(), waypoint.getY(), latestRobotX(robotCode), latestRobotY(robotCode),
+                        mapManager.activeMetadata().map(m -> m.getMapName()).orElse("未知"));
+                eventMonitor.onMapSuspect(robotCode, detail);
+                publishTerminal(kernelTaskId, state, "failed", "导航分段异常: " + detail);
+                return false;
+            }
+            // 到达本段终点：释放已走过的路径段 + 身后途经点（交通资源渐进释放）
+            if (segments != null && i - 1 < segments.size()) {
+                trafficRegistry.releaseSegments(robotCode, List.of(segments.get(i - 1).id()));
+            }
+            trafficRegistry.releaseBehind(robotCode, currentWaypoint);
+            routeRegistry.advance(robotCode, next);
+            // 分段进度事件（可观测：每段到达即更新；携带分配评分保持 trace 可见）
+            publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                    String.format("导航进度 %d/%d：已到达 %s", i, routeWaypoints.size() - 1, next),
+                    withAssignmentTrace(state, Map.of()));
+            currentWaypoint = next;
+        }
+        return true;
+    }
+
+    /** 段级超时：段长/保守速度 + 基础余量，下限为基础超时。 */
+    private double segmentTimeoutSeconds(List<com.zioneer.robotscheduler.core.routing.NavigationRoute.Segment> segments,
+                                         int segmentIndex, WaypointMetadata waypoint, WaypointMetadata target) {
+        double length = 0;
+        double timeoutSpeed = segmentConservativeSpeedMps;
+        if (segments != null && segmentIndex < segments.size()) {
+            length = segments.get(segmentIndex).lengthMeters();
+            // 限速可能低于保守巡航速度，超时预算不能短于按实际下发限速行驶的时间。
+            timeoutSpeed = Math.min(timeoutSpeed, segments.get(segmentIndex).maxSpeedMetersPerSecond());
+        } else {
+            length = Math.hypot(waypoint.getX() - target.getX(), waypoint.getY() - target.getY());
+        }
+        return Math.max(navigationTimeoutBaseSeconds,
+                length / timeoutSpeed + navigationTimeoutBaseSeconds);
+    }
+
+    /**
+     * 本体自动充电接管完成路径：等待充电结束（is_charging 变 false = 充满/被停）或超时，
+     * 不下发 start-activity（真机 charge 模板 body 任务自带自充语义，重复下发会被拒并误触 stop 防御）。
+     */
+    private void completeByBodyAutoCharge(String kernelTaskId, KernelTaskState state, String robotCode,
+                                          TaskGoal goal, long timeoutSeconds) {
+        publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                "本体自动充电中，等待充电结束（最长 " + (timeoutSeconds >= 3600 ? timeoutSeconds / 3600 + "h" : timeoutSeconds + "s") + "）",
+                withAssignmentTrace(state, Map.of()));
+        long deadline = System.currentTimeMillis() + timeoutSeconds * 1000;
+        while (System.currentTimeMillis() < deadline) {
+            if (state.isCanceled()) {
+                return;
+            }
+            if (!isBodyCharging(robotCode)) {
+                break;
+            }
+            try {
+                TimeUnit.SECONDS.sleep(5);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        taskStates.remove(kernelTaskId);
+        routeRegistry.clear(robotCode);
+        Map<String, Object> detail = new HashMap<>();
+        detail.put("body_auto_charge", true);
+        publishRaw(kernelTaskId, null, robotCode, goal, "completed", null,
+                "充电完成（本体自动充电，调度接管等待）", terminalDetail(state, detail));
+        log.info("任务完成(本体自动充电): task={} robot={}", kernelTaskId, robotCode);
+    }
+
+    /** 动作中文名（状态事件文案）。 */
+    private String zhAction(String action) {
+        return switch (action == null ? "" : action) {
+            case "charge" -> "充电";
+            case "quality_inspection" -> "质检";
+            case "swap_battery" -> "换电";
+            case "pause_task" -> "暂停";
+            case "resume_task" -> "恢复";
+            default -> action == null ? "动作" : action;
+        };
+    }
+
+    /** 本体忙拒绝识别（真机任务状态机卡死防御：任务完成/取消未自动关闭需 stop 清除）。 */
+    private boolean isBodyBusyReject(String detail) {
+        if (detail == null) {
+            return false;
+        }
+        // 两种契约变体：中文"已有在途任务"[BODY_START_TASK_REJECTED]；
+        // 英文"task_id in flight (status=idle), stop first"[BODY_ADD_TASK_REJECTED]（取消未清干净的残留任务）
+        return detail.contains("已有在途任务")
+                || detail.contains("BODY_START_TASK_REJECTED")
+                || detail.contains("BODY_ADD_TASK_REJECTED")
+                || detail.contains("task_id in flight")
+                || detail.contains("stop first");
+    }
+
+    /** busy 拒绝恢复：stop 清除本体在途任务后等待其生效。 */
+    private void recoverFromBodyBusy(String robotCode, String stage, String detail) {
+        log.warn("本体忙拒绝，发送 stop 清除在途任务后重试: robot={} stage={} detail={}",
+                robotCode, stage, detail);
+        commandExecutor.stop(robotCode, 0, null);
+        try {
+            TimeUnit.MILLISECONDS.sleep(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** 本体充电中（管理接口 battery.is_charging，30s 缓存新鲜度）。 */
+    private boolean isBodyCharging(String robotCode) {
+        return fleetStateMirror.list().stream()
+                .filter(r -> robotCode.equals(r.getRobotCode()))
+                .findFirst()
+                .map(r -> Boolean.TRUE.equals(r.getBodyCharging()))
+                .orElse(false);
+    }
+
+    /** 机器人当前是否停在充电位上（驻留吸附 0.5m + type=charge 校验）。 */
+    private boolean onChargeWaypoint(String robotCode) {
+        var graph = mapManager.activeGraph().orElse(null);
+        if (graph == null || !graph.isLoaded()) {
+            return false;
+        }
+        String floorId = resolveFloorId(null);
+        var attachment = graph.attach(floorId, latestRobotX(robotCode), latestRobotY(robotCode),
+                com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.DWELL_WAYPOINT_THRESHOLD,
+                com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.DWELL_SEGMENT_THRESHOLD);
+        if (attachment.waypointId() == null) {
+            return false;
+        }
+        return graph.waypoint(floorId, attachment.waypointId())
+                .map(waypoint -> waypoint.getType()
+                        == com.zioneer.robotscheduler.core.map.WaypointType.CHARGE)
+                .orElse(false);
+    }
+
+    /**
+     * 本体提前充电止损：充电任务导航途中 is_charging=true 但机器人不在任何充电位上
+     * （本体对模板任务自充时未校验点位类型）→ 停掉本体任务并快速失败，
+     * 防止机器人在普通点上"假充电"占着机器人 1 小时。
+     */
+    private void failPrematureCharging(String kernelTaskId, KernelTaskState state, String robotCode,
+                                       TaskGoal goal) {
+        var target = resolveWaypoint(goal);
+        double distance = target == null ? -1
+                : Math.hypot(latestRobotX(robotCode) - target.getX(), latestRobotY(robotCode) - target.getY());
+        String detail = String.format(
+                "本体提前充电：当前位置不在任何充电位上（距充电目标 %s %.1fm），疑似本体对充电任务在导航段完成时自充且未校验点位类型，已停止本体任务，请检查本体充电逻辑",
+                goal.goalWaypointId(), distance);
+        log.warn("本体提前充电止损: task={} robot={} distance={}m", kernelTaskId, robotCode,
+                String.format("%.1f", distance));
+        commandExecutor.stop(robotCode, 0, null);
+        publishTerminal(kernelTaskId, state, "failed", detail);
+    }
+
+    /**
+     * 充电任务感知等待：分片轮询（0.5s），本体自动开始充电时立即返回（不必等命令超时才发现）。
+     * 非充电任务退化为阻塞等待。
+     */
+    private RobotCommandExecutor.CommandResult awaitChargeAware(RobotCommandExecutor.CommandHandle handle,
+                                                                 double timeoutSeconds, String kernelTaskId,
+                                                                 String robotCode, String stage,
+                                                                 KernelTaskState state) {
+        if (!TaskCategories.CHARGE.equals(state.goal().category())) {
+            return await(handle, timeoutSeconds, kernelTaskId, robotCode, stage);
+        }
+        long deadline = System.currentTimeMillis() + (long) (timeoutSeconds * 1000);
+        while (System.currentTimeMillis() < deadline) {
+            if (handle.future().isDone()) {
+                return await(handle, 0.1, kernelTaskId, robotCode, stage);
+            }
+            if (isBodyCharging(robotCode)) {
+                return RobotCommandExecutor.CommandResult.failed("BODY_AUTO_CHARGING");
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return RobotCommandExecutor.CommandResult.failed("命令等待被中断");
+            }
+        }
+        return await(handle, 0.1, kernelTaskId, robotCode, stage);
+    }
+
+    private RobotCommandExecutor.CommandResult await(RobotCommandExecutor.CommandHandle handle,
+                                                      double timeoutSeconds, String kernelTaskId,
+                                                      String robotCode, String stage) {
+        try {
+            return handle.future().get((long) (timeoutSeconds * 1000), TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            String detail = "命令等待超时 " + timeoutSeconds + "s（阶段: " + stage + "）";
+            log.warn("命令等待超时: task={} robot={} stage={} timeout={}s",
+                    kernelTaskId, robotCode, stage, timeoutSeconds);
+            commandExecutor.abandon(robotCode, detail);
+            return RobotCommandExecutor.CommandResult.failed(detail);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return RobotCommandExecutor.CommandResult.failed("命令等待被中断");
+        } catch (java.util.concurrent.ExecutionException e) {
+            return RobotCommandExecutor.CommandResult.failed("命令执行异常: " + e.getCause().getMessage());
+        }
+    }
+
+    private boolean waitForRobotReady(String robotCode, KernelTaskState state) {
+        long deadline = System.currentTimeMillis() + robotReadyTimeoutSeconds * 1000;
+        while (System.currentTimeMillis() < deadline) {
+            if (state.isCanceled()) {
+                return false;
+            }
+            RobotSnapshot snapshot = fleetStateMirror.list().stream()
+                    .filter(robot -> robotCode.equals(robot.getRobotCode()))
+                    .findFirst()
+                    .orElse(null);
+            if (snapshot != null && snapshot.isDispatchable()) {
+                return true;
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** 充电位被其他机器人驻留占用时自动改派最近空闲充电位（返回 null = 维持原目标走等待语义）。 */
+    private TaskGoal swapChargeTargetIfBlocked(String kernelTaskId, KernelTaskState state, String robotCode,
+                                               TaskGoal goal, WaypointMetadata target) {
+        String dwellOwner = dwellOwnerOf(target.getId());
+        if (dwellOwner == null || dwellOwner.equals(robotCode)) {
+            return null;
+        }
+        var graph = mapManager.activeGraph().filter(g -> g.isLoaded()).orElse(null);
+        if (graph == null) {
+            return null;
+        }
+        String floorId = resolveFloorId(goal);
+        java.util.Set<String> occupied = trafficRegistry.occupiedWaypointsExcluding(robotCode);
+        WaypointMetadata best = null;
+        double bestDist = Double.MAX_VALUE;
+        double rx = latestRobotX(robotCode);
+        double ry = latestRobotY(robotCode);
+        for (var candidate : graph.waypointsByType(floorId,
+                com.zioneer.robotscheduler.core.map.WaypointType.CHARGE)) {
+            if (candidate.getId().equals(target.getId()) || occupied.contains(candidate.getId())) {
+                continue;
+            }
+            double dist = Math.hypot(candidate.getX() - rx, candidate.getY() - ry);
+            if (dist < bestDist) {
+                best = candidate;
+                bestDist = dist;
+            }
+        }
+        if (best == null) {
+            // 全部充电位被占：无桩可换，维持原目标走等待语义
+            return null;
+        }
+        Map<String, Object> params = new HashMap<>(goal.parameters() == null ? Map.of() : goal.parameters());
+        params.put("charger_waypoint", best.getId());
+        TaskGoal swapped = new TaskGoal(goal.category(), goal.floorId(), best.getId(), goal.action(),
+                goal.actionLabel(), goal.standbyWaypointId(), params);
+        state.setGoal(swapped);
+        log.info("充电位被驻留占用，自动改派: task={} robot={} {} 被 {} 占用 -> {}",
+                kernelTaskId, robotCode, target.getId(), dwellOwner, best.getId());
+        publishRaw(kernelTaskId, null, robotCode, swapped, "underway", null,
+                "充电位 " + target.getId() + " 被 " + dwellOwner + " 驻留占用，自动改派最近空闲充电位 " + best.getId(),
+                withAssignmentTrace(state, Map.of()));
+        return swapped;
+    }
+
+    /** 驻留占用者查询（InMemory 实现能力；多实例实现返回 null 走等待语义）。 */
+    private String dwellOwnerOf(String waypointId) {
+        if (trafficRegistry instanceof com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry registry) {
+            return registry.dwellOwner(waypointId);
+        }
+        return null;
+    }
+
+    /** 交通阻塞精准描述：机器人离图 / 目标点驻留占用者 / 目标点任务占用者 / 一般路径冲突。 */
+    private String describeTrafficBlock(String robotCode, WaypointMetadata target) {
+        // 离图优先标注（吸不上图时其余占用描述没有意义；路段中间不算离图）
+        var graph = mapManager.activeGraph().orElse(null);
+        if (graph != null && graph.isLoaded()
+                && !graph.attach(resolveFloorId(null), latestRobotX(robotCode), latestRobotY(robotCode),
+                        com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.MAX_MERGE_WAYPOINT_DISTANCE,
+                        com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.MAX_MERGE_LANE_DISTANCE)
+                        .attached()) {
+            return "机器人当前位置无法吸附到地图拓扑（离图），等待回到图上";
+        }
+        if (trafficRegistry instanceof com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry registry) {
+            String dwellOwner = registry.dwellOwner(target.getId());
+            if (dwellOwner != null && !dwellOwner.equals(robotCode)) {
+                return "目标点 " + target.getId() + " 被静止机器人 " + dwellOwner + " 驻留占用";
+            }
+        }
+        return "目标点 " + target.getId() + " 或必经路径被其他机器人长期占用";
+    }
+
+    private NavigationLease acquireTraffic(String kernelTaskId, KernelTaskState state, String robotCode,
+                                           WaypointMetadata target) {
+        // 持续等待模式（对齐旧栈"任务等资源"语义）：冲突时不快速失败，
+        // 循环重试直到占用成功或等待上限（5 分钟，防死等）；
+        // 每隔 30s 发布等待事件（原因+进度），长等待不再黑箱
+        long deadline = System.currentTimeMillis() + TRAFFIC_WAIT_LIMIT_SECONDS * 1000;
+        long startedAt = System.currentTimeMillis();
+        long lastEventAt = 0;
+        while (System.currentTimeMillis() < deadline) {
+            NavigationLease lease = tryAcquireOnce(robotCode, target);
+            if (lease != null) {
+                return lease;
+            }
+            long now = System.currentTimeMillis();
+            if (now - lastEventAt >= TRAFFIC_WAIT_EVENT_INTERVAL_MILLIS) {
+                lastEventAt = now;
+                publishRaw(kernelTaskId, null, robotCode, state.goal(), "underway", null,
+                        String.format("交通等待中: %s（已等待 %ds / 上限 %ds）",
+                                describeTrafficBlock(robotCode, target),
+                                (now - startedAt) / 1000, TRAFFIC_WAIT_LIMIT_SECONDS),
+                        withAssignmentTrace(state, Map.of()));
+            }
+            try {
+                TimeUnit.SECONDS.sleep(TRAFFIC_RETRY_INTERVAL_SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+        waitIntents.clear(robotCode);
+        return null;
+    }
+
+    /**
+     * 段前复检：下一段终点/路段是否被其他机器人占用（活动路线或驻留）。
+     * 租约申请与实际到达该段之间有时间差，期间外部移动/后到驻留的机器人可能已占道。
+     * 被占 → 原地等待（周期事件可见）；清空 → 放行；超时 → 失败止损；取消 → 静默退出。
+     *
+     * @return true 可放行；false 不可放行（终态已发布或由取消链路发布）
+     */
+    private boolean awaitSegmentEntryClear(String kernelTaskId, KernelTaskState state, String robotCode,
+                                           String fromWaypoint, String nextWaypoint, String segmentId) {
+        long deadline = System.currentTimeMillis() + TRAFFIC_WAIT_LIMIT_SECONDS * 1000;
+        long startedAt = System.currentTimeMillis();
+        long lastEventAt = 0;
+        while (System.currentTimeMillis() < deadline) {
+            String blocker = segmentEntryBlocker(robotCode, nextWaypoint, segmentId);
+            if (blocker == null) {
+                return true;
+            }
+            if (state.isCanceled()) {
+                return false;
+            }
+            long now = System.currentTimeMillis();
+            if (now - lastEventAt >= TRAFFIC_WAIT_EVENT_INTERVAL_MILLIS) {
+                lastEventAt = now;
+                publishRaw(kernelTaskId, null, robotCode, state.goal(), "underway", null,
+                        String.format("段前让行等待: %s->%s 前方被占（%s，已等 %ds / 上限 %ds）",
+                                fromWaypoint, nextWaypoint, blocker,
+                                (now - startedAt) / 1000, TRAFFIC_WAIT_LIMIT_SECONDS),
+                        withAssignmentTrace(state, Map.of()));
+            }
+            try {
+                TimeUnit.SECONDS.sleep(TRAFFIC_RETRY_INTERVAL_SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        String blocker = segmentEntryBlocker(robotCode, nextWaypoint, segmentId);
+        publishTerminal(kernelTaskId, state, "failed",
+                String.format("段前复检超时: %s->%s 前方持续被占（%s，等待 %ds 超限）",
+                        fromWaypoint, nextWaypoint, blocker == null ? "未知" : blocker,
+                        TRAFFIC_WAIT_LIMIT_SECONDS));
+        return false;
+    }
+
+    /** 下一段终点/路段的占用途径：其他机器人活动路线（点/段租约）或驻留（点/段）。 */
+    private String segmentEntryBlocker(String robotCode, String nextWaypoint, String segmentId) {
+        if (trafficRegistry.occupiedWaypointsExcluding(robotCode).contains(nextWaypoint)) {
+            return "点 " + nextWaypoint + " 被占用";
+        }
+        if (segmentId != null
+                && trafficRegistry.occupiedSegmentsExcluding(robotCode).contains(segmentId)) {
+            return "路段 " + segmentId + " 被占用";
+        }
+        return null;
+    }
+
+    private NavigationLease tryAcquireOnce(String robotCode, WaypointMetadata target) {
+        for (int attempt = 1; attempt <= TRAFFIC_RETRY_TIMES; attempt++) {
+            var graph = mapManager.activeGraph().orElse(null);
+            if (graph == null || !graph.isLoaded()) {
+                // 无图模式：只占用目标点位
+                if (trafficRegistry.tryAcquire(robotCode, List.of(), Set.of(target.getId()),
+                        Duration.ofMinutes(30))) {
+                    waitIntents.clear(robotCode);
+                    return NavigationLease.single(target.getId());
+                }
+                continue;
+            }
+            var attachment = graph.attach(resolveFloorId(null), latestRobotX(robotCode), latestRobotY(robotCode),
+                    com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.MAX_MERGE_WAYPOINT_DISTANCE,
+                    com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.MAX_MERGE_LANE_DISTANCE);
+            String fromWaypoint = attachment.waypointId();
+            if (fromWaypoint == null && attachment.segmentId() != null) {
+                // 路段中间（距点超阈值、距段在阈值内）：取该段离机器人较近端点作为规划起点
+                fromWaypoint = graph.segmentEdge(resolveFloorId(null), attachment.segmentId())
+                        .map(edge -> nearerSegmentEndpoint(robotCode, edge))
+                        .orElse(null);
+            }
+            if (fromWaypoint == null) {
+                // 吸附失败（机器人离图/位置丢失）：不降级为单点租约——单段直发远目标
+                // 既无交通占用（对向不避让）也可能撞机器人导航栈单次目标过远限制。
+                // 返回 null 由外层等待重试（回到图上自动恢复），超时以精准原因失败
+                return null;
+            }
+            var route = graph.plan(resolveFloorId(null), fromWaypoint, target.getId(), assignProperties.getNavigationMaxSpeedMps(),
+                    // 规划约束排除自身占用：机器人驻留在自家门口路段时，不能把直连边封死（绕路 bug 修复）
+                    trafficRegistry.occupiedSegmentsExcluding(robotCode),
+                    // 封锁点含静止机器人驻留点（场景：死端必经点被堵 → 无路可达 → 持续等待其离开）
+                    trafficRegistry.occupiedWaypointsExcluding(robotCode));
+            if (route.isEmpty()) {
+                // 直连不可达（被占）：登记等待意图，进入下一轮
+                waitIntents.record(robotCode, List.of());
+                continue;
+            }
+            List<String> segmentIds = route.get().segments().stream()
+                    .map(NavigationRouteSegmentIdMapper::id)
+                    .toList();
+            // 途经点全量持有（不只目标点）：路线租约必须覆盖全部途经点——
+            // 否则其他机器人可以把"我的途经点"当目标申请成功，两车对同一交点汇合相撞；
+            // 身后点随行进 releaseBehind 渐进释放，不会过度锁路
+            if (trafficRegistry.tryAcquire(robotCode, segmentIds,
+                    new java.util.HashSet<>(route.get().waypointIds()),
+                    Duration.ofMinutes(30))) {
+                waitIntents.clear(robotCode);
+                return NavigationLease.ofRoute(route.get().waypointIds(), route.get().segments());
+            }
+            // 占用失败：登记等待意图（死锁检测输入）
+            waitIntents.record(robotCode, segmentIds);
+            return null;
+        }
+        return null;
+    }
+
+    /** 段两端点中离机器人较近者（路段中间起步的规划起点）。 */
+    private String nearerSegmentEndpoint(String robotCode,
+            com.zioneer.robotscheduler.core.routing.NavigationGraph.SegmentEdge edge) {
+        var graph = mapManager.activeGraph().orElse(null);
+        if (graph == null) {
+            return edge.fromWaypointId();
+        }
+        String floorId = resolveFloorId(null);
+        var from = graph.waypoint(floorId, edge.fromWaypointId()).orElse(null);
+        var to = graph.waypoint(floorId, edge.toWaypointId()).orElse(null);
+        if (from == null || to == null) {
+            return edge.fromWaypointId();
+        }
+        double x = latestRobotX(robotCode);
+        double y = latestRobotY(robotCode);
+        return Math.hypot(from.getX() - x, from.getY() - y) <= Math.hypot(to.getX() - x, to.getY() - y)
+                ? edge.fromWaypointId() : edge.toWaypointId();
+    }
+
+    private WaypointMetadata resolveWaypoint(TaskGoal goal) {
+        var graph = mapManager.activeGraph().orElse(null);
+        if (graph == null) {
+            return null;
+        }
+        String floorId = resolveFloorId(goal);
+        return graph.waypointByIdOrName(floorId, goal.goalWaypointId()).orElse(null);
+    }
+
+    private String resolveFloorId(TaskGoal goal) {
+        if (goal != null && goal.floorId() != null && !goal.floorId().isBlank()) {
+            return goal.floorId();
+        }
+        return mapManager.activeFloorId().orElse(null);
+    }
+
+    private Map<String, Object> buildDescription(String kernelTaskId, TaskGoal goal, String navTargetPoint) {
+        return buildDescription(kernelTaskId, goal, navTargetPoint, true);
+    }
+
+    /**
+     * @param includeTemplateType 是否携带 task_template_type 标记：充电任务的导航段一律不带——
+     *                            本体对充电模板任务会自充且行为不稳定（收到即充/到点才充，均不校验
+     *                            是否在充电位上）；充电统一"纯导航到位 + start-activity 显式充电"
+     */
+    private Map<String, Object> buildDescription(String kernelTaskId, TaskGoal goal, String navTargetPoint,
+                                                 boolean includeTemplateType) {
+        Map<String, Object> description = new HashMap<>(goal.parameters() == null
+                ? Map.of() : goal.parameters());
+        description.put("rmf_task_id", kernelTaskId);
+        if (includeTemplateType) {
+            description.put("task_template_type", goal.category());
+        }
+        // RMS 契约：navigate 校验 description.nav_target_point（分段时为当前段目标点位名）
+        if (navTargetPoint != null) {
+            description.put("nav_target_point", navTargetPoint);
+        } else if (goal.requiresNavigation()) {
+            description.put("nav_target_point", goal.goalWaypointId());
+        }
+        return description;
+    }
+
+    long actionTimeoutSeconds(TaskGoal goal) {
+        Object configured = goal.parameters() == null ? null : goal.parameters().get("action_timeout_seconds");
+        if (configured instanceof Number number) {
+            return number.longValue();
+        }
+        // 充电动作默认放宽到 1h（充满回执慢，生产任务流不带超时参数，300s 必超时）
+        if (TaskCategories.CHARGE.equals(goal.category())) {
+            return 3600;
+        }
+        return actionTimeoutDefaultSeconds;
+    }
+
+    /**
+     * 到达偏差采样 + 复核：任一次采样回到阈值内即通过（位置帧滞后是暂态）；
+     * 全部采样都超阈才返回最终偏差（真错位是持续的）。取消等待期间不空转。
+     */
+    private double confirmArrivalDeviation(String robotCode, WaypointMetadata waypoint,
+                                           String kernelTaskId, String waypointId) {
+        double deviation = Double.MAX_VALUE;
+        int attempts = Math.max(1, arrivalConfirmAttempts);
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            if (attempt > 1) {
+                try {
+                    Thread.sleep(Math.max(0, arrivalConfirmIntervalMillis));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            deviation = Math.hypot(latestRobotX(robotCode) - waypoint.getX(),
+                    latestRobotY(robotCode) - waypoint.getY());
+            if (deviation <= mapMismatchThresholdMeters) {
+                if (attempt > 1) {
+                    log.info("到达位置复核通过: task={} robot={} waypoint={} 首次偏差超阈，第 {} 次采样 {}m（状态帧滞后回执）",
+                            kernelTaskId, robotCode, waypointId, attempt, String.format("%.1f", deviation));
+                }
+                return deviation;
+            }
+        }
+        return deviation;
+    }
+
+    private double latestRobotX(String robotCode) {
+        return fleetStateMirror.list().stream()
+                .filter(robot -> robotCode.equals(robot.getRobotCode()))
+                .findFirst().map(RobotSnapshot::getX).orElse(0.0);
+    }
+
+    private double latestRobotY(String robotCode) {
+        return fleetStateMirror.list().stream()
+                .filter(robot -> robotCode.equals(robot.getRobotCode()))
+                .findFirst().map(RobotSnapshot::getY).orElse(0.0);
+    }
+
+    /** 事件明细合并分配评分（mirror/DB 只存最新事件，trace 需随每次发布携带）。 */
+    private Map<String, Object> withAssignmentTrace(KernelTaskState state, Map<String, Object> detail) {
+        List<Map<String, Object>> trace = state == null ? null : state.assignmentTrace();
+        if (trace == null) {
+            return detail == null ? Map.of() : detail;
+        }
+        Map<String, Object> merged = new HashMap<>(detail == null ? Map.of() : detail);
+        merged.put("assignment_trace", trace);
+        return merged;
+    }
+
+    /** 终态事件明细：分配评分 + 规划路线审计（detail.route_waypoints，随任务状态落库）。 */
+    private Map<String, Object> terminalDetail(KernelTaskState state, Map<String, Object> detail) {
+        Map<String, Object> merged = new HashMap<>(withAssignmentTrace(state, detail));
+        List<String> route = state == null ? null : state.routeWaypointIds();
+        if (route != null && !route.isEmpty()) {
+            merged.put("route_waypoints", route);
+        }
+        return merged;
+    }
+
+    private void publishState(String kernelTaskId, String status, TaskRecord record, String robotCode,
+                               TaskGoal goal, Map<String, Object> cancellation) {
+        publishRaw(kernelTaskId, record, robotCode, goal, status, cancellation, null);
+    }
+
+    private void publishTerminal(String kernelTaskId, KernelTaskState state, String status, String message) {
+        publishTerminal(kernelTaskId, state, status, message, Map.of());
+    }
+
+    private void publishTerminal(String kernelTaskId, KernelTaskState state, String status, String message,
+                                   Map<String, Object> extraDetail) {
+        taskStates.remove(kernelTaskId);
+        routeRegistry.clear(state.robotCode());
+        publishRaw(kernelTaskId, null, state.robotCode(), state.goal(), status, null, message,
+                terminalDetail(state, extraDetail));
+        log.info("任务终态: task={} status={} message={}", kernelTaskId, status, message);
+    }
+
+    private void publishRaw(String kernelTaskId, TaskRecord record, String robotCode, TaskGoal goal,
+                            String status, Map<String, Object> cancellation, String message) {
+        publishRaw(kernelTaskId, record, robotCode, goal, status, cancellation, message, Map.of());
+    }
+
+    private void publishRaw(String kernelTaskId, TaskRecord record, String robotCode, TaskGoal goal,
+                            String status, Map<String, Object> cancellation, String message,
+                            Map<String, Object> extraDetail) {
+        var fleet = fleetStateMirror.list().stream()
+                .filter(robot -> robotCode != null && robotCode.equals(robot.getRobotCode()))
+                .findFirst().map(RobotSnapshot::getFleetName).orElse(null);
+        Map<String, Object> detail = new HashMap<>(goal == null ? Map.of() : goal.parameters());
+        if (extraDetail != null && !extraDetail.isEmpty()) {
+            detail.putAll(extraDetail);
+        }
+        TaskStateEvent event = TaskStateEvent.withMessage(kernelTaskId, status,
+                goal == null ? null : goal.category(), detail, cancellation, fleet, robotCode,
+                record == null ? null : record.getSchedulerRequestId(), message,
+                System.currentTimeMillis());
+        eventBus.publishTaskState(event);
+    }
+
+    /**
+     * 停靠导航：质检动作完成后让出作业点，导航至停靠等待点（parameters.end_point）。
+     *
+     * @return 成功到达返回停靠点 id；失败返回 null（不阻断任务完成）
+     */
+    private String navigateToStandby(String kernelTaskId, KernelTaskState state, String robotCode,
+                                     TaskGoal goal) {
+        try {
+            WaypointMetadata standbyTarget = resolveWaypoint(
+                    new TaskGoal(goal.category(), goal.floorId(), goal.standbyWaypointId(),
+                            null, null, null, goal.parameters()));
+            if (standbyTarget == null) {
+                log.warn("停靠点不存在，跳过停靠: task={} standby={}", kernelTaskId, goal.standbyWaypointId());
+                return null;
+            }
+            NavigationLease lease = acquireTraffic(kernelTaskId, state, robotCode, standbyTarget);
+            if (lease == null) {
+                log.warn("停靠点交通占用超时，原地待命: task={} standby={}", kernelTaskId,
+                        goal.standbyWaypointId());
+                return null;
+            }
+            // 停靠段路线覆盖主路线（可视化跟随最后一段导航）
+            routeRegistry.register(robotCode, kernelTaskId, resolveFloorId(goal), lease.routeWaypointIds());
+            try {
+                return navigateBySegments(kernelTaskId, state, robotCode, goal, lease, standbyTarget)
+                        ? standbyTarget.getId() : null;
+            } finally {
+                trafficRegistry.releaseAll(robotCode);
+                routeRegistry.clear(robotCode);
+            }
+        } catch (Exception e) {
+            log.warn("停靠导航异常，原地待命: task={} error={}", kernelTaskId, e.getMessage());
+            return null;
+        }
+    }
+
+    private String safeDetail(String detail) {
+        return detail == null || detail.isBlank() ? "未知原因" : detail;
+    }
+
+    private String generateKernelTaskId(TaskRecord record) {
+        String category = record.getCategory() == null ? "task" : record.getCategory();
+        return category + "." + Long.toString(Math.abs(UUID.randomUUID().getMostSignificantBits()), 36);
+    }
+
+    /** 导航占用信息：携带规划路径（途经点+段信息）供分段执行。 */
+    private record NavigationLease(List<String> routeWaypointIds,
+                                   List<com.zioneer.robotscheduler.core.routing.NavigationRoute.Segment> segments) {
+
+        static NavigationLease single(String targetWaypointId) {
+            return new NavigationLease(List.of(targetWaypointId), List.of());
+        }
+
+        static NavigationLease ofRoute(List<String> waypointIds,
+                                       List<com.zioneer.robotscheduler.core.routing.NavigationRoute.Segment> segments) {
+            return new NavigationLease(waypointIds, segments);
+        }
+    }
+
+    /** 段 id 映射辅助。 */
+    private static final class NavigationRouteSegmentIdMapper {
+
+        private static String id(com.zioneer.robotscheduler.core.routing.NavigationRoute.Segment segment) {
+            return segment.id();
+        }
+    }
+
+    /** 内核任务执行状态。 */
+    private static final class KernelTaskState {
+
+        private final String schedulerRequestId;
+        private volatile TaskGoal goal;
+        private volatile String robotCode;
+        private volatile ExecutionPhase phase = ExecutionPhase.QUEUED;
+        private volatile boolean canceled;
+        /** 自动分配评分明细（wire JSON 列表，underway 事件携带；指定机器人时为 null）。 */
+        private volatile List<Map<String, Object>> assignmentTrace;
+        /** 规划路线途经点（租约获取时登记；终态事件审计携带）。 */
+        private volatile List<String> routeWaypointIds;
+
+        private KernelTaskState(String schedulerRequestId, String robotCode, TaskGoal goal,
+                                ExecutionPhase phase) {
+            this.schedulerRequestId = schedulerRequestId;
+            this.robotCode = robotCode;
+            this.goal = goal;
+            this.phase = phase;
+        }
+
+        String schedulerRequestId() {
+            return schedulerRequestId;
+        }
+
+        String robotCode() {
+            return robotCode;
+        }
+
+        void assignRobot(String robot) {
+            this.robotCode = robot;
+        }
+
+        TaskGoal goal() {
+            return goal;
+        }
+
+        /** 目标更新（充电位被占自动改派场景）。 */
+        void setGoal(TaskGoal goal) {
+            this.goal = goal;
+        }
+
+        ExecutionPhase phase() {
+            return phase;
+        }
+
+        List<Map<String, Object>> assignmentTrace() {
+            return assignmentTrace;
+        }
+
+        void setAssignmentTrace(List<Map<String, Object>> trace) {
+            this.assignmentTrace = trace;
+        }
+
+        List<String> routeWaypointIds() {
+            return routeWaypointIds;
+        }
+
+        void setRouteWaypointIds(List<String> routeWaypointIds) {
+            this.routeWaypointIds = routeWaypointIds;
+        }
+
+        boolean isCanceled() {
+            return canceled;
+        }
+
+        void markCanceled() {
+            this.canceled = true;
+        }
+
+        void markRunning() {
+            this.phase = ExecutionPhase.RUNNING;
+        }
+    }
+
+    /** 等待自动分配的任务。 */
+    private record PendingAssignment(String kernelTaskId, TaskRecord record, TaskGoal goal,
+                                     String fleetName, String robotGroup, long deadlineMillis) {
+    }
+
+    private enum ExecutionPhase {
+        QUEUED, RUNNING, DONE
+    }
+}

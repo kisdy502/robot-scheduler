@@ -1,0 +1,17 @@
+# 本地联调 profile：加载 local-map 真实地图（map1022Pro）+ 真实 RMS
+# 启动：--spring.profiles.active=local
+spring:
+  flyway:
+    enabled: false
+
+robot:
+  scheduler:
+    fleet:
+      # RMS 地图编码 L1 → 调度地图 floorId F1
+      map-name-mapping:
+        L1: F1
+    map:
+      metadata-path: ../local-map/map_info.json
+      pgm-path: ../local-map/global_map.pgm
+      yaml-path: ../local-map/global_map.yaml
+      fallback-to-files: true

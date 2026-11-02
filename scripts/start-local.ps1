@@ -1,0 +1,12 @@
+$env:SERVER_PORT = "8091"
+$env:DB_HOST = "127.0.0.1"
+$env:DB_PORT = "55432"
+$env:DB_NAME = "scheduler_service"
+$env:DB_USERNAME = "scheduler"
+$env:DB_PASSWORD = "scheduler"
+$env:REDIS_HOST = "127.0.0.1"
+$env:REDIS_PORT = "6379"
+$env:MAP_METADATA_PATH = "D:\robotscheduler\robot-scheduler\local-map\map_info.json"
+# 返充阈值覆盖示例（默认 20）：$env:CHARGE_LOW_BATTERY = "101"
+$proc = Start-Process -FilePath "java" -ArgumentList "-Dfile.encoding=UTF-8","-Dsun.stdout.encoding=UTF-8","-Dsun.stderr.encoding=UTF-8","-jar","D:\robotscheduler\robot-scheduler\robot-scheduler-boot\target\robot-scheduler-boot-0.1.0-SNAPSHOT.jar" -WorkingDirectory "D:\robotscheduler\robot-scheduler" -RedirectStandardOutput "D:\robotscheduler\robot-scheduler\logs\server.log" -RedirectStandardError "D:\robotscheduler\robot-scheduler\logs\server-err.log" -PassThru
+"PID=$($proc.Id)"

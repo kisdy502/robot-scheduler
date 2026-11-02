@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        robot-scheduler：机器人调度系统（Java 重构版）
+        替代原 robot-scheduler-rest-api + rmf-qc-fleet-adapter + RMF Core 三件套。
+        版本基线对齐 robot-platform-parent：Java 21 / Boot 3.3.5。
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.zioneer.robotscheduler</groupId>
+    <artifactId>robot-scheduler</artifactId>
+    <version>${revision}</version>
+    <packaging>pom</packaging>
+    <name>robot-scheduler</name>
+    <description>Robot scheduling service (Java rewrite of RMF-based scheduler stack)</description>
+
+    <modules>
+        <module>robot-scheduler-common</module>
+        <module>robot-scheduler-core</module>
+        <module>robot-scheduler-rms-client</module>
+        <module>robot-scheduler-persistence</module>
+        <module>robot-scheduler-api</module>
+        <module>robot-scheduler-boot</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <revision>0.1.0-SNAPSHOT</revision>
+        <!-- 与 robot-platform-parent 保持一致的第三方基线 -->
+        <springdoc.version>2.6.0</springdoc.version>
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
+        <lombok.version>1.18.34</lombok.version>
+        <mapstruct.version>1.5.5.Final</mapstruct.version>
+        <flatten-maven-plugin.version>1.6.0</flatten-maven-plugin.version>
+        <!-- 新增：调度内核依赖 -->
+        <jgrapht.version>1.5.2</jgrapht.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- 本项目模块 -->
+            <dependency>
+                <groupId>com.zioneer.robotscheduler</groupId>
+                <artifactId>robot-scheduler-common</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.zioneer.robotscheduler</groupId>
+                <artifactId>robot-scheduler-core</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.zioneer.robotscheduler</groupId>
+                <artifactId>robot-scheduler-rms-client</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.zioneer.robotscheduler</groupId>
+                <artifactId>robot-scheduler-persistence</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.zioneer.robotscheduler</groupId>
+                <artifactId>robot-scheduler-api</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <!-- 第三方（不由 spring-boot BOM 管理的） -->
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mapstruct</groupId>
+                <artifactId>mapstruct</artifactId>
+                <version>${mapstruct.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mapstruct</groupId>
+                <artifactId>mapstruct-processor</artifactId>
+                <version>${mapstruct.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jgrapht</groupId>
+                <artifactId>jgrapht-core</artifactId>
+                <version>${jgrapht.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <distributionManagement>
+        <repository>
+            <id>central</id>
+            <name>zioneer-maven-dev-virtual-releases</name>
+            <url>http://10.6.43.11:8081/artifactory/zioneer-maven-dev-virtual</url>
+        </repository>
+        <snapshotRepository>
+            <id>snapshots</id>
+            <name>zioneer-maven-dev-virtual-snapshots</name>
+            <url>http://10.6.43.11:8081/artifactory/zioneer-maven-dev-virtual</url>
+        </snapshotRepository>
+    </distributionManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                        <release>${java.version}</release>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                            <path>
+                                <groupId>org.mapstruct</groupId>
+                                <artifactId>mapstruct-processor</artifactId>
+                                <version>${mapstruct.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+                <!-- ${revision} 版本扁平化，保证子模块 install 后依赖可解析 -->
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>flatten-maven-plugin</artifactId>
+                    <version>${flatten-maven-plugin.version}</version>
+                    <configuration>
+                        <updatePomFile>true</updatePomFile>
+                        <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>flatten</id>
+                            <phase>process-resources</phase>
+                            <goals>
+                                <goal>flatten</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

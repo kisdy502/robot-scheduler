@@ -1,0 +1,101 @@
+server:
+  port: ${SERVER_PORT:8090}
+
+spring:
+  application:
+    name: robot-scheduler
+  datasource:
+    # stringtype=unspecified：MyBatis-Plus JacksonTypeHandler 写 jsonb 的前提
+    # 共享基础设施：platform robot-postgres（docker），IDEA 直连 127.0.0.1:55432
+    url: jdbc:postgresql://${DB_HOST:127.0.0.1}:${DB_PORT:55432}/${DB_NAME:scheduler_service}?stringtype=unspecified
+    username: ${DB_USERNAME:robot_user}
+    password: ${DB_PASSWORD:robot_password}
+    hikari:
+      maximum-pool-size: 20
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: true
+      logic-not-delete-value: false
+
+robot:
+  scheduler:
+    fleet:
+      state-interval-millis: ${FLEET_STATE_INTERVAL_MILLIS:1000}
+      inventory-interval-millis: ${FLEET_INVENTORY_INTERVAL_MILLIS:10000}
+      stale-after-seconds: 15.0
+      off-graph-warning-interval-seconds: 30.0
+      # RMS 地图编码 → 调度地图 floorId 映射（当前 RMS 用 L1，地图编辑器用 F1）
+      map-name-mapping:
+        L1: F1
+    assign:
+      # 分配 ETA 与导航下发共用速度上限（m/s），仍受地图更低限速约束
+      navigation-max-speed-mps: ${SCHEDULER_NAVIGATION_MAX_SPEED_MPS:1.0}
+      low-battery-threshold-percent: 30.0
+      battery-penalty-weight-seconds: 120.0
+      busy-penalty-seconds: 300.0
+      # ---- 充电中断策略（ChargingInterruptionPolicy）：充电机能否打断执行任务 ----
+      # 放行条件：预计任务耗电后电量 ≥ 返充线(30%) + 安全余量；打断带代价，空闲机同等条件优先
+      charging-interruption-margin-percent: ${ASSIGN_CHARGING_MARGIN_PERCENT:10.0}
+      charging-interrupt-penalty-seconds: ${ASSIGN_CHARGING_INTERRUPT_PENALTY_SECONDS:120}
+      battery-drain-percent-per-minute: ${ASSIGN_BATTERY_DRAIN_PERCENT_PER_MINUTE:0.5}
+      assignment-timeout-seconds: 60
+    charge:
+      low-battery-threshold-percent: ${CHARGE_LOW_BATTERY:20.0}
+      scan-interval-millis: 30000
+    rms:
+      base-url: ${RMS_BASE_URL:http://127.0.0.1:18083}
+      fleet-name: ${RMS_FLEET_NAME:RG_20260407_00001}
+      connect-timeout-seconds: 3.0
+      read-timeout-seconds: 15.0
+      mock-enabled: ${RMS_MOCK_ENABLED:false}
+      # 充电动作线上模板标识兜底（优先用任务流 task_template_code；此值覆盖内部自动充电等无任务流场景）
+      charge-activity-name: ${RMS_CHARGE_ACTIVITY_NAME:back-charge}
+      # 报文级追踪（调试联调）：出站命令请求/响应 JSON 全量打印；status 轮询只打带回执的帧
+      # （completed_commands 非空），纯状态心跳/inventory 不打；联调稳定后置 false（RMS_TRACE_PAYLOAD=false）
+      trace-payload: ${RMS_TRACE_PAYLOAD:true}
+    map:
+      # 本地调试兜底路径（DB 无激活版本时加载）；生产走 /api/v1/maps/upload 上传
+      metadata-path: ${MAP_METADATA_PATH:}
+      pgm-path: ${MAP_PGM_PATH:}
+      yaml-path: ${MAP_YAML_PATH:}
+      attachment-dir: ${MAP_ATTACHMENT_DIR:./data/map-attachments}
+      fallback-to-files: true
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env,configprops,scheduledtasks
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  # IDEA 控制台对 ANSI 自动识别常失败，强制开启保证彩色日志（java -jar 在终端同样有效）
+  output:
+    ansi:
+      enabled: always
+  level:
+    com.zioneer.robotscheduler: INFO

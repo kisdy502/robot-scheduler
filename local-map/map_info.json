@@ -1,0 +1,1333 @@
+{
+  "versionInfo" : {
+    "version" : "v3.4.7",
+    "status" : "published",
+    "lastModified" : "2026-10-28T05:53:25Z",
+    "modifiedBy" : "admin"
+  },
+  "mapInfo" : {
+    "mapName" : "map1027S",
+    "coordinateSystem" : "map",
+    "unit" : "meters",
+    "floors" : [ {
+      "floorId" : "F1",
+      "name" : "Floor 1",
+      "elevation" : 0.0,
+      "defaultMaxSpeed" : 1.0,
+      "waypoints" : [ {
+        "id" : "P1",
+        "name" : "P1",
+        "position" : [ -2.1238, -0.1217, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P2",
+        "name" : "P2",
+        "position" : [ -1.9319, 4.6754, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P3",
+        "name" : "P3",
+        "position" : [ -2.3157, 10.0865, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W1",
+        "name" : "W1",
+        "position" : [ -2.7762, 15.3826, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P4",
+        "name" : "P4",
+        "position" : [ -2.2773, 20.7553, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W2",
+        "name" : "W2",
+        "position" : [ 2.9803, 20.6786, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P5",
+        "name" : "P5",
+        "position" : [ 5.8586, 20.7937, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P6",
+        "name" : "P6",
+        "position" : [ 5.897, 13.0032, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P7",
+        "name" : "P7",
+        "position" : [ 11.3465, 20.4867, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "H1",
+        "name" : "H1",
+        "position" : [ 16.796, 20.3716, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P8",
+        "name" : "P8",
+        "position" : [ 11.5, 16.1501, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P9",
+        "name" : "P9",
+        "position" : [ 17.1414, 15.9198, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W3",
+        "name" : "W3",
+        "position" : [ 13.3421, 11.8903, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P10",
+        "name" : "P10",
+        "position" : [ 22.2839, 16.5722, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C1",
+        "name" : "C1",
+        "position" : [ 21.5931, 20.5251, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "P11",
+        "name" : "P11",
+        "position" : [ 27.1962, 16.5339, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P12",
+        "name" : "P12",
+        "position" : [ 32.07, 16.956, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C2",
+        "name" : "C2",
+        "position" : [ 32.0317, 21.0623, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "P13",
+        "name" : "P13",
+        "position" : [ 37.7498, 16.9944, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "H2",
+        "name" : "H2",
+        "position" : [ 43.6215, 17.0328, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P14",
+        "name" : "P14",
+        "position" : [ 37.9033, 14.2696, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "H3",
+        "name" : "H3",
+        "position" : [ 43.468, 13.7324, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P15",
+        "name" : "P15",
+        "position" : [ 32.4922, 12.3124, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P16",
+        "name" : "P16",
+        "position" : [ 27.2345, 12.0821, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P17",
+        "name" : "P17",
+        "position" : [ 22.6677, 11.967, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P18",
+        "name" : "P18",
+        "position" : [ 22.6677, 8.0142, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W4",
+        "name" : "W4",
+        "position" : [ 16.0669, 7.9758, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P19",
+        "name" : "P19",
+        "position" : [ 32.2619, 7.8607, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P20",
+        "name" : "P20",
+        "position" : [ 38.9011, 9.319, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P21",
+        "name" : "P21",
+        "position" : [ 43.468, 9.3958, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C3",
+        "name" : "C3",
+        "position" : [ 46.8451, 9.3574, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "P22",
+        "name" : "P22",
+        "position" : [ 4.8608, 4.8673, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P23",
+        "name" : "P23",
+        "position" : [ 12.3059, 4.4451, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "H4",
+        "name" : "H4",
+        "position" : [ 22.092, 4.2532, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P24",
+        "name" : "P24",
+        "position" : [ 32.1084, 4.6754, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P25",
+        "name" : "P25",
+        "position" : [ 38.6325, 4.7521, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P26",
+        "name" : "P26",
+        "position" : [ 43.3912, 4.8673, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C4",
+        "name" : "C4",
+        "position" : [ 46.9987, 4.9057, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "P27",
+        "name" : "P27",
+        "position" : [ 4.6267, -0.7626, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P28",
+        "name" : "P28",
+        "position" : [ 9.2703, -0.9161, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "E1",
+        "name" : "E1",
+        "position" : [ 16.2165, -0.6091, 0.0 ],
+        "type" : "elevator"
+      }, {
+        "id" : "P29",
+        "name" : "P29",
+        "position" : [ 22.8174, -0.5324, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P30",
+        "name" : "P30",
+        "position" : [ 30.723, -0.1486, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P31",
+        "name" : "P31",
+        "position" : [ 38.3216, -0.187, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P32",
+        "name" : "P32",
+        "position" : [ 44.6155, 0.7341, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C5",
+        "name" : "C5",
+        "position" : [ 47.8391, -0.0335, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "P33",
+        "name" : "P33",
+        "position" : [ 38.7054, -4.5619, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P34",
+        "name" : "P34",
+        "position" : [ 38.8589, -8.745, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P35",
+        "name" : "P35",
+        "position" : [ 39.1275, -12.6978, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W5",
+        "name" : "W5",
+        "position" : [ 44.4619, -11.8535, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "W6",
+        "name" : "W6",
+        "position" : [ 39.1659, -15.1156, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P36",
+        "name" : "P36",
+        "position" : [ 43.9247, -15.154, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P37",
+        "name" : "P37",
+        "position" : [ 44.0398, -20.2965, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P38",
+        "name" : "P38",
+        "position" : [ 4.3581, -5.6365, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P39",
+        "name" : "P39",
+        "position" : [ 4.3964, -9.5893, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P40",
+        "name" : "P40",
+        "position" : [ 9.0784, -5.9819, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P41",
+        "name" : "P41",
+        "position" : [ 8.9633, -9.9731, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P42",
+        "name" : "P42",
+        "position" : [ 15.6409, -5.7516, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W7",
+        "name" : "W7",
+        "position" : [ 21.9347, -5.2527, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "C6",
+        "name" : "C6",
+        "position" : [ -1.3601, -12.1222, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "P43",
+        "name" : "P43",
+        "position" : [ 14.6431, -9.7812, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W8",
+        "name" : "W8",
+        "position" : [ 18.9797, -14.3097, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P44",
+        "name" : "P44",
+        "position" : [ 14.2209, -14.348, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P45",
+        "name" : "P45",
+        "position" : [ 9.7692, -14.9621, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P46",
+        "name" : "P46",
+        "position" : [ 9.5389, -18.3392, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P47",
+        "name" : "P47",
+        "position" : [ 5.5477, -16.9193, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "H5",
+        "name" : "H5",
+        "position" : [ -0.4007, -16.5739, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P48",
+        "name" : "P48",
+        "position" : [ 14.9232, -18.3143, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P49",
+        "name" : "P49",
+        "position" : [ 19.5131, -18.4026, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P50",
+        "name" : "P50",
+        "position" : [ 28.2957, -17.564, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P51",
+        "name" : "P51",
+        "position" : [ 27.5895, -11.2529, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "W9",
+        "name" : "W9",
+        "position" : [ 27.1482, -5.6921, 0.0 ],
+        "type" : "workstation"
+      }, {
+        "id" : "P52",
+        "name" : "P52",
+        "position" : [ 32.0911, -5.0743, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P53",
+        "name" : "P53",
+        "position" : [ 31.9146, -10.5909, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P54",
+        "name" : "P54",
+        "position" : [ 31.9587, -16.5931, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "H6",
+        "name" : "H6",
+        "position" : [ 31.7381, -20.4768, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P55",
+        "name" : "P55",
+        "position" : [ 37.343, -20.212, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P56",
+        "name" : "P56",
+        "position" : [ 36.8134, -16.2842, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C7",
+        "name" : "C7",
+        "position" : [ 46.6111, -19.5942, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "H7",
+        "name" : "H7",
+        "position" : [ 42.7273, -22.0215, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P57",
+        "name" : "P57",
+        "position" : [ 26.9717, -20.4768, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C8",
+        "name" : "C8",
+        "position" : [ 23.3086, -20.4327, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "H8",
+        "name" : "H8",
+        "position" : [ 26.7951, -22.7277, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P58",
+        "name" : "P58",
+        "position" : [ 18.2332, -21.0506, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "P59",
+        "name" : "P59",
+        "position" : [ 14.4378, -21.1388, 0.0 ],
+        "type" : "path"
+      }, {
+        "id" : "C9",
+        "name" : "C9",
+        "position" : [ 9.892, -21.4478, 0.0 ],
+        "type" : "charge"
+      }, {
+        "id" : "H9",
+        "name" : "H9",
+        "position" : [ 5.7876, -21.1388, 0.0 ],
+        "type" : "parking"
+      }, {
+        "id" : "P60",
+        "name" : "P60",
+        "position" : [ -0.038, -21.7567, 0.0 ],
+        "type" : "path"
+      } ],
+      "zoneConstraints" : [ ],
+      "shelves" : [ ],
+      "paths" : [ {
+        "id" : "PATH_001",
+        "from" : "P4",
+        "to" : "W2",
+        "waypoints" : [ "P4", "W2" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_002",
+        "from" : "W2",
+        "to" : "P5",
+        "waypoints" : [ "W2", "P5" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_003",
+        "from" : "P5",
+        "to" : "P7",
+        "waypoints" : [ "P5", "P7" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_004",
+        "from" : "P7",
+        "to" : "H1",
+        "waypoints" : [ "P7", "H1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_005",
+        "from" : "H1",
+        "to" : "C1",
+        "waypoints" : [ "H1", "C1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_006",
+        "from" : "C1",
+        "to" : "C2",
+        "waypoints" : [ "C1", "C2" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_007",
+        "from" : "C2",
+        "to" : "P12",
+        "waypoints" : [ "C2", "P12" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_008",
+        "from" : "P12",
+        "to" : "P11",
+        "waypoints" : [ "P12", "P11" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_009",
+        "from" : "P10",
+        "to" : "P10",
+        "waypoints" : [ "P10", "P11", "P10" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_010",
+        "from" : "P10",
+        "to" : "C1",
+        "waypoints" : [ "P10", "C1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_011",
+        "from" : "H1",
+        "to" : "P9",
+        "waypoints" : [ "H1", "P9" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_012",
+        "from" : "P9",
+        "to" : "P10",
+        "waypoints" : [ "P9", "P10" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_013",
+        "from" : "P9",
+        "to" : "P8",
+        "waypoints" : [ "P9", "P8" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true,
+        "segments" : [ {
+          "seq" : 1,
+          "from" : "P9",
+          "to" : "P8",
+          "segmentType" : "CURVE",
+          "controlPoints" : [ [ 15.5458, 15.7972 ], [ 13.3325, 16.5604 ] ],
+          "backUp" : false,
+          "reverse" : false
+        } ]
+      }, {
+        "id" : "PATH_014",
+        "from" : "P5",
+        "to" : "P6",
+        "waypoints" : [ "P5", "P6" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_015",
+        "from" : "P4",
+        "to" : "W1",
+        "waypoints" : [ "P4", "W1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_016",
+        "from" : "W1",
+        "to" : "P3",
+        "waypoints" : [ "W1", "P3" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_017",
+        "from" : "P2",
+        "to" : "P3",
+        "waypoints" : [ "P2", "P3" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_018",
+        "from" : "P6",
+        "to" : "P3",
+        "waypoints" : [ "P6", "P3" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_019",
+        "from" : "P6",
+        "to" : "P22",
+        "waypoints" : [ "P6", "P22" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_020",
+        "from" : "P22",
+        "to" : "P2",
+        "waypoints" : [ "P22", "P2" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_021",
+        "from" : "P22",
+        "to" : "P23",
+        "waypoints" : [ "P22", "P23" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_022",
+        "from" : "P23",
+        "to" : "H4",
+        "waypoints" : [ "P23", "H4" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_023",
+        "from" : "H4",
+        "to" : "P18",
+        "waypoints" : [ "H4", "P18" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_024",
+        "from" : "P18",
+        "to" : "P17",
+        "waypoints" : [ "P18", "P17" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_025",
+        "from" : "P17",
+        "to" : "P10",
+        "waypoints" : [ "P17", "P10" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_026",
+        "from" : "P8",
+        "to" : "W3",
+        "waypoints" : [ "P8", "W3" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true,
+        "segments" : [ {
+          "seq" : 1,
+          "from" : "P8",
+          "to" : "W3",
+          "segmentType" : "CURVE",
+          "controlPoints" : [ [ 11.6344, 13.6793 ], [ 12.8816, 12.9552 ] ],
+          "backUp" : false,
+          "reverse" : false
+        } ]
+      }, {
+        "id" : "PATH_027",
+        "from" : "W3",
+        "to" : "W4",
+        "waypoints" : [ "W3", "W4" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true,
+        "segments" : [ {
+          "seq" : 1,
+          "from" : "W3",
+          "to" : "W4",
+          "segmentType" : "CURVE",
+          "controlPoints" : [ [ 13.9621, 9.0047 ], [ 15.3857, 8.9544 ] ],
+          "backUp" : false,
+          "reverse" : false
+        } ]
+      }, {
+        "id" : "PATH_028",
+        "from" : "W4",
+        "to" : "P18",
+        "waypoints" : [ "W4", "P18" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_029",
+        "from" : "H4",
+        "to" : "P24",
+        "waypoints" : [ "H4", "P24" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_030",
+        "from" : "P24",
+        "to" : "P19",
+        "waypoints" : [ "P24", "P19" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_031",
+        "from" : "P19",
+        "to" : "P15",
+        "waypoints" : [ "P19", "P15" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_032",
+        "from" : "P15",
+        "to" : "P12",
+        "waypoints" : [ "P15", "P12" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_033",
+        "from" : "P11",
+        "to" : "P16",
+        "waypoints" : [ "P11", "P16" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_034",
+        "from" : "P16",
+        "to" : "P17",
+        "waypoints" : [ "P16", "P17" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_035",
+        "from" : "P16",
+        "to" : "P15",
+        "waypoints" : [ "P16", "P15" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_036",
+        "from" : "P12",
+        "to" : "P13",
+        "waypoints" : [ "P12", "P13" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_037",
+        "from" : "P13",
+        "to" : "P14",
+        "waypoints" : [ "P13", "P14" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_038",
+        "from" : "P13",
+        "to" : "H2",
+        "waypoints" : [ "P13", "H2" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_039",
+        "from" : "H2",
+        "to" : "H3",
+        "waypoints" : [ "H2", "H3" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_040",
+        "from" : "H3",
+        "to" : "P14",
+        "waypoints" : [ "H3", "P14" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_041",
+        "from" : "P14",
+        "to" : "P15",
+        "waypoints" : [ "P14", "P15" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_042",
+        "from" : "H3",
+        "to" : "P21",
+        "waypoints" : [ "H3", "P21" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_043",
+        "from" : "P21",
+        "to" : "P20",
+        "waypoints" : [ "P21", "P20" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_044",
+        "from" : "P21",
+        "to" : "C3",
+        "waypoints" : [ "P21", "C3" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_045",
+        "from" : "P21",
+        "to" : "P26",
+        "waypoints" : [ "P21", "P26" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_046",
+        "from" : "P25",
+        "to" : "P26",
+        "waypoints" : [ "P25", "P26" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_047",
+        "from" : "P20",
+        "to" : "P19",
+        "waypoints" : [ "P20", "P19" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_048",
+        "from" : "P20",
+        "to" : "P25",
+        "waypoints" : [ "P20", "P25" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_049",
+        "from" : "P24",
+        "to" : "P25",
+        "waypoints" : [ "P24", "P25" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_050",
+        "from" : "P26",
+        "to" : "C4",
+        "waypoints" : [ "P26", "C4" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_051",
+        "from" : "P26",
+        "to" : "P32",
+        "waypoints" : [ "P26", "P32" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_052",
+        "from" : "P32",
+        "to" : "C5",
+        "waypoints" : [ "P32", "C5" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_053",
+        "from" : "P32",
+        "to" : "P31",
+        "waypoints" : [ "P32", "P31" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_054",
+        "from" : "P31",
+        "to" : "P33",
+        "waypoints" : [ "P31", "P33" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_055",
+        "from" : "P34",
+        "to" : "P33",
+        "waypoints" : [ "P34", "P33" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_056",
+        "from" : "P34",
+        "to" : "P35",
+        "waypoints" : [ "P34", "P35" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_057",
+        "from" : "W5",
+        "to" : "P35",
+        "waypoints" : [ "W5", "P35" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_058",
+        "from" : "W5",
+        "to" : "P36",
+        "waypoints" : [ "W5", "P36" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_059",
+        "from" : "P35",
+        "to" : "W6",
+        "waypoints" : [ "P35", "W6" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_060",
+        "from" : "P36",
+        "to" : "W6",
+        "waypoints" : [ "P36", "W6" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_061",
+        "from" : "P56",
+        "to" : "W6",
+        "waypoints" : [ "P56", "W6" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_062",
+        "from" : "P56",
+        "to" : "P55",
+        "waypoints" : [ "P56", "P55" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_063",
+        "from" : "P55",
+        "to" : "H7",
+        "waypoints" : [ "P55", "H7" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_064",
+        "from" : "H7",
+        "to" : "P37",
+        "waypoints" : [ "H7", "P37" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_065",
+        "from" : "P37",
+        "to" : "P37",
+        "waypoints" : [ "P37", "C7", "P37" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_066",
+        "from" : "P37",
+        "to" : "P36",
+        "waypoints" : [ "P37", "P36" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_067",
+        "from" : "P33",
+        "to" : "P52",
+        "waypoints" : [ "P33", "P52" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_068",
+        "from" : "W9",
+        "to" : "P52",
+        "waypoints" : [ "W9", "P52" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_069",
+        "from" : "P52",
+        "to" : "P53",
+        "waypoints" : [ "P52", "P53" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_070",
+        "from" : "W9",
+        "to" : "P51",
+        "waypoints" : [ "W9", "P51" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_071",
+        "from" : "P53",
+        "to" : "P54",
+        "waypoints" : [ "P53", "P54" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_072",
+        "from" : "P51",
+        "to" : "P50",
+        "waypoints" : [ "P51", "P50" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_073",
+        "from" : "P54",
+        "to" : "H6",
+        "waypoints" : [ "P54", "H6" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_074",
+        "from" : "H6",
+        "to" : "P55",
+        "waypoints" : [ "H6", "P55" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_075",
+        "from" : "P50",
+        "to" : "P57",
+        "waypoints" : [ "P50", "P57" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_076",
+        "from" : "P50",
+        "to" : "P54",
+        "waypoints" : [ "P50", "P54" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_077",
+        "from" : "P53",
+        "to" : "P51",
+        "waypoints" : [ "P53", "P51" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_078",
+        "from" : "P30",
+        "to" : "P31",
+        "waypoints" : [ "P30", "P31" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_079",
+        "from" : "P31",
+        "to" : "P25",
+        "waypoints" : [ "P31", "P25" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_080",
+        "from" : "P30",
+        "to" : "P29",
+        "waypoints" : [ "P30", "P29" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_081",
+        "from" : "P29",
+        "to" : "E1",
+        "waypoints" : [ "P29", "E1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_082",
+        "from" : "E1",
+        "to" : "P28",
+        "waypoints" : [ "E1", "P28" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_083",
+        "from" : "P28",
+        "to" : "P27",
+        "waypoints" : [ "P28", "P27" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_084",
+        "from" : "P22",
+        "to" : "P27",
+        "waypoints" : [ "P22", "P27" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_085",
+        "from" : "P27",
+        "to" : "P1",
+        "waypoints" : [ "P27", "P1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_086",
+        "from" : "P2",
+        "to" : "P1",
+        "waypoints" : [ "P2", "P1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_087",
+        "from" : "P27",
+        "to" : "P38",
+        "waypoints" : [ "P27", "P38" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_089",
+        "from" : "P29",
+        "to" : "W7",
+        "waypoints" : [ "P29", "W7" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_090",
+        "from" : "W7",
+        "to" : "W9",
+        "waypoints" : [ "W7", "W9" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_091",
+        "from" : "W7",
+        "to" : "P42",
+        "waypoints" : [ "W7", "P42" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_092",
+        "from" : "P42",
+        "to" : "P40",
+        "waypoints" : [ "P42", "P40" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_093",
+        "from" : "P40",
+        "to" : "P38",
+        "waypoints" : [ "P40", "P38" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_094",
+        "from" : "P38",
+        "to" : "P39",
+        "waypoints" : [ "P38", "P39" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_095",
+        "from" : "P40",
+        "to" : "P41",
+        "waypoints" : [ "P40", "P41" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_096",
+        "from" : "P42",
+        "to" : "P43",
+        "waypoints" : [ "P42", "P43" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_097",
+        "from" : "P43",
+        "to" : "P41",
+        "waypoints" : [ "P43", "P41" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_098",
+        "from" : "P41",
+        "to" : "P39",
+        "waypoints" : [ "P41", "P39" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_099",
+        "from" : "P39",
+        "to" : "C6",
+        "waypoints" : [ "P39", "C6" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_100",
+        "from" : "C6",
+        "to" : "H5",
+        "waypoints" : [ "C6", "H5" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_101",
+        "from" : "H5",
+        "to" : "P60",
+        "waypoints" : [ "H5", "P60" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_102",
+        "from" : "H5",
+        "to" : "P47",
+        "waypoints" : [ "H5", "P47" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_103",
+        "from" : "P47",
+        "to" : "H9",
+        "waypoints" : [ "P47", "H9" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_104",
+        "from" : "P47",
+        "to" : "P46",
+        "waypoints" : [ "P47", "P46" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_105",
+        "from" : "P46",
+        "to" : "C9",
+        "waypoints" : [ "P46", "C9" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_106",
+        "from" : "P46",
+        "to" : "P48",
+        "waypoints" : [ "P46", "P48" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_107",
+        "from" : "P48",
+        "to" : "P59",
+        "waypoints" : [ "P48", "P59" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_108",
+        "from" : "P48",
+        "to" : "P49",
+        "waypoints" : [ "P48", "P49" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_109",
+        "from" : "P49",
+        "to" : "P58",
+        "waypoints" : [ "P49", "P58" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_110",
+        "from" : "P49",
+        "to" : "C8",
+        "waypoints" : [ "P49", "C8" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_111",
+        "from" : "C8",
+        "to" : "P57",
+        "waypoints" : [ "C8", "P57" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_112",
+        "from" : "W8",
+        "to" : "P49",
+        "waypoints" : [ "W8", "P49" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_113",
+        "from" : "W8",
+        "to" : "P44",
+        "waypoints" : [ "W8", "P44" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_114",
+        "from" : "P44",
+        "to" : "P48",
+        "waypoints" : [ "P44", "P48" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_115",
+        "from" : "P44",
+        "to" : "P43",
+        "waypoints" : [ "P44", "P43" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_116",
+        "from" : "P45",
+        "to" : "P44",
+        "waypoints" : [ "P45", "P44" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_117",
+        "from" : "P41",
+        "to" : "P45",
+        "waypoints" : [ "P41", "P45" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_118",
+        "from" : "P45",
+        "to" : "P46",
+        "waypoints" : [ "P45", "P46" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_088",
+        "from" : "E1",
+        "to" : "E1",
+        "waypoints" : [ "E1", "P42", "E1" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true
+      }, {
+        "id" : "PATH_119",
+        "from" : "W8",
+        "to" : "P51",
+        "waypoints" : [ "W8", "P51" ],
+        "isBidirectional" : true,
+        "enableObstacleAvoidance" : true,
+        "segments" : [ {
+          "seq" : 1,
+          "from" : "W8",
+          "to" : "P51",
+          "segmentType" : "CURVE",
+          "controlPoints" : [ [ 19.2086, -11.8328 ], [ 25.1759, -10.1856 ] ],
+          "backUp" : false,
+          "reverse" : false
+        } ]
+      } ]
+    } ],
+    "interFloorConnections" : [ ]
+  }
+}

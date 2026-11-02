@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.zioneer.robotscheduler</groupId>
+        <artifactId>robot-scheduler</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>robot-scheduler-core</artifactId>
+    <name>robot-scheduler-core</name>
+    <description>调度内核（替代 RMF）：拓扑图/路径规划/资源占用/任务分配/任务执行/机器人管理。
+        端口定义在本模块（RobotGateway/TaskRecordRepository/ChargerPoolPort 等），由 rms-client 与 persistence 提供实现；
+        本模块不依赖 Web 与数据库，保证可独立单测。</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.zioneer.robotscheduler</groupId>
+            <artifactId>robot-scheduler-common</artifactId>
+        </dependency>
+        <!-- 事件总线与组件模型；不引入 web -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+        </dependency>
+        <!-- @AutoConfiguration 条件装配（仅注解与条件类，不拉 web/server） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!-- 拓扑路径规划（Dijkstra/A*） -->
+        <dependency>
+            <groupId>org.jgrapht</groupId>
+            <artifactId>jgrapht-core</artifactId>
+        </dependency>
+        <!-- 地图元数据 json 解析（纯序列化库，无容器依赖；AGENTS.md 已放宽） -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <!-- 测试 -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

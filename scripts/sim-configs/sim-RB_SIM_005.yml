@@ -1,0 +1,115 @@
+# qcrobotmock 专用配置：map1025L 场景（对接本机 RMS + 调度系统）
+# 与原 qc-robot-mock.yml 差异：zenoh namespace / RMS 地址 / map1025L 点位坐标
+# 各台机器人的初始/归巢位置由 start-sim-robots.ps1 命令行覆盖（--motion.initial_x 等）
+robot:
+  robot_code: RB_SIM_TEMPLATE
+  serial_no: SN_RB_SIM_TEMPLATE
+  robot_name: 玄骨魔祖
+  robot_type: qc-robot
+  robot_type_no: ""
+  ip: 127.0.0.1
+  model: QC-MOCK-MODEL
+  hardware_version: mock-hw-1.0
+  firmware_version: mock-fw-1.0
+  client_version: 0.0.1-SNAPSHOT
+  manufacturer: zioneer-mock
+  mac_address: "00:11:22:33:44:66"
+  vendor_type_code: QC-MOCK
+  video_url: ws://127.0.0.1:8080/qc-robot/mock
+  protocol_version: v1
+  capabilities:
+    - navigate
+    - start-activity
+    - stop-task
+    - pause-task
+    - resume-task
+    - mapping
+    - quality-inspection
+    - charge
+    - return-home
+
+zenoh:
+  transport: tcp
+  endpoints:
+    - tcp/127.0.0.1:7447
+  register_key: zioneer/robot-management-service/api/v1/robot-mgr/register
+  robot_key_prefix: robot-management/robots
+  query_timeout_ms: 5000
+  register: true
+  continue_without_register: false
+  # 与 RMS zenoh-client.json5 的 namespace 一致（key 路由必需）
+  namespace: test-dispatch
+
+robot_management:
+  base_url: http://127.0.0.1:18083
+  enabled: true
+  group_no: RG_20260407_00001
+  group_name: RG_20260407_00001
+  request_timeout_ms: 5000
+  auth_token: ""
+  continue_on_error: true
+
+runtime:
+  heartbeat_interval_ms: 5000
+  # 1Hz 状态上报（对齐真机节奏）：5s 周期会让位置帧滞后回执帧 ~4s，
+  # 触发调度到达偏差校验（3m 阈值）误判地图不一致
+  status_interval_ms: 1000
+  run_seconds: 0
+  scheduler_threads: 4
+
+simulation:
+  auto_complete: true
+  task_complete_delay_ms: 1000
+  complete_on_start_task_types:
+    - start-activity
+  activity_complete_delay_ms: 3000
+  initial_battery_percent: 92
+  charge_complete_battery_percent: 100
+  charge_rate_percent_per_second: 10.0
+  publish_body_status_report: true
+  publish_legacy_status_report: true
+
+motion:
+  frame_id: L1
+  # 默认初始位（map1025L H1）；各台实际初始/归巢由 start-sim-robots.ps1 命令行覆盖
+  initial_x: 1.50
+  initial_y: 9.27
+  initial_yaw: 0.0
+  linear_speed_mps: 1.0
+  angular_speed_radps: 1.5
+  arrival_tolerance: 0.05
+  home_x: 1.50
+  home_y: 9.27
+  home_yaw: 0.0
+  # map1027S 充电位 C1（低电量返充目标；旧图坐标 9.17/8.58 已废弃——那次"离图"事故的根因）
+  charger_x: 21.5931
+  charger_y: 20.5251
+  charger_yaw: 0.0
+
+maps:
+  # SLAM 地图标识：与调度激活地图名一致（三方地图一致性校验；上报 L1 会被判不一致禁派）
+  current_map_name: map1027S
+  active_profile: map1027s
+  entries:
+    - map_id: MAP1027S-L1
+      map_name: map1027S
+      metadata:
+        scene: map1027S
+        profile: sim
+        charger_waypoint: C1
+        home_waypoint: H1
+  profiles:
+    map1027s:
+      frame_id: L1
+      # initial/home 留空：不覆盖 motion.initial_x 等命令行参数（各台独立初始位由启动脚本传入）
+      chargers:
+        C1:
+          x: 21.5931
+          y: 20.5251
+          yaw: 0.0
+      waypoints:
+        H1: { x: 16.796, y: 20.3716, yaw: 0.0 }
+        C1: { x: 21.5931, y: 20.5251, yaw: 0.0 }
+        W4: { x: 16.0669, y: 7.9758, yaw: 0.0 }
+        P9: { x: 17.1414, y: 15.9199, yaw: 0.0 }
+        H3: { x: 43.468, y: 13.7324, yaw: 0.0 }

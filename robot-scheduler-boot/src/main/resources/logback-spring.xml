@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true" scanPeriod="60 seconds">
+
+    <!-- 注册 Spring Boot 的 %clr / %wEx 等自定义转换器（彩色 pattern 依赖） -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name"
+                    defaultValue="robot-scheduler"/>
+    <springProperty scope="context" name="ROOT_LEVEL" source="logging.level.root" defaultValue="INFO"/>
+    <springProperty scope="context" name="APP_LOG_FILE" source="logging.file.name"
+                    defaultValue="${LOG_FILE:-${LOG_PATH:-logs}/${APP_NAME}.log}"/>
+    <springProperty scope="context" name="LOG_FILE_PATTERN" source="logging.logback.rollingpolicy.file-name-pattern"
+                    defaultValue="${APP_LOG_FILE}.%d{yyyy-MM-dd}.%i.log.gz"/>
+    <springProperty scope="context" name="LOG_MAX_FILE_SIZE" source="logging.logback.rollingpolicy.max-file-size"
+                    defaultValue="100MB"/>
+    <springProperty scope="context" name="LOG_MAX_HISTORY" source="logging.logback.rollingpolicy.max-history"
+                    defaultValue="30"/>
+    <springProperty scope="context" name="LOG_TOTAL_SIZE_CAP" source="logging.logback.rollingpolicy.total-size-cap"
+                    defaultValue="3GB"/>
+    <springProperty scope="context" name="LOG_CLEAN_HISTORY_ON_START"
+                    source="logging.logback.rollingpolicy.clean-history-on-start" defaultValue="false"/>
+
+    <!-- 控制台彩色（需 spring.output.ansi.enabled=always，IDEA 控制台自动识别常失败，须强制开启）；
+         %msg 按级别着色：INFO 绿 / WARN 黄 / ERROR 红 / DEBUG 淡灰。
+         注意：%n 必须放在 %clr(...) 内部——logback 解析坑：复合转换器右括号后紧跟 %n 会被当字面量
+         文本输出（整屏日志挤成一行），已用 ConsolePatternTest 锁定该行为 -->
+    <property name="CONSOLE_PATTERN"
+              value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr([%thread]){faint} %clr(%-5level) %clr([traceId=%X{traceId:-},spanId=%X{spanId:-},robot_code=%X{robot_code:-}]){faint} %clr(%logger{36}){cyan} - %clr(%msg%n)"/>
+    <!-- 文件纯文本；%replace 剥离消息里嵌入的 ANSI 颜色码（\x1B[...m），保证文件干净可 grep -->
+    <property name="FILE_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [traceId=%X{traceId:-},spanId=%X{spanId:-},robot_code=%X{robot_code:-}] %logger{36} - %replace(%msg){'\x1B\[[0-9;]*m', ''}%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${CONSOLE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${APP_LOG_FILE}</file>
+        <append>true</append>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_FILE_PATTERN}</fileNamePattern>
+            <maxFileSize>${LOG_MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${LOG_MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${LOG_TOTAL_SIZE_CAP}</totalSizeCap>
+            <cleanHistoryOnStart>${LOG_CLEAN_HISTORY_ON_START}</cleanHistoryOnStart>
+        </rollingPolicy>
+    </appender>
+
+    <logger name="org.springframework" level="INFO"/>
+    <logger name="org.springframework.web" level="INFO"/>
+    <logger name="org.mybatis" level="INFO"/>
+
+    <root level="${ROOT_LEVEL}">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>

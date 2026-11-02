@@ -1,0 +1,31 @@
+# 本地联调环境：不自建基础设施，复用 qc-robot 平台栈（root-manager-platform-run/infrastructure）
+# - PostgreSQL: robot-postgres  (localhost:55432, robot_user/robot_password, 库 scheduler_service 已建好)
+# - Redis:      robot-redis     (localhost:6379, 无密码, 逻辑库 2 与其他应用隔离)
+# 用法：docker compose -f local-dev/docker-compose.yml up -d --build
+services:
+  robot-scheduler:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: robot-scheduler
+    environment:
+      DB_HOST: host.docker.internal
+      DB_PORT: 55432
+      DB_NAME: scheduler_service
+      DB_USERNAME: robot_user
+      DB_PASSWORD: robot_password
+      REDIS_HOST: host.docker.internal
+      REDIS_PORT: 6379
+      # 逻辑库隔离：nav-deployer=0 / RMS=1 / scheduler=2，避免共用 db0 键冲突
+      SPRING_DATA_REDIS_DATABASE: "2"
+      RMS_BASE_URL: ${RMS_BASE_URL:-https://sz-robot-admin.zioneer.com/robot-management-service}
+      RMS_FLEET_NAME: ${RMS_FLEET_NAME:-RG_20260407_00001}
+      SERVER_PORT: 8090
+      TZ: Asia/Shanghai
+      # 本地开发限制堆内存，避免多个 JVM 互相挤压
+      JAVA_OPTS: -XX:+UseContainerSupport -Xms256m -Xmx512m -Dfile.encoding=UTF-8
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
