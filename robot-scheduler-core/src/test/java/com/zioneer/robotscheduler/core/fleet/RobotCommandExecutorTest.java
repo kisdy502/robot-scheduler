@@ -47,6 +47,7 @@ class RobotCommandExecutorTest {
         when(gateway.ackCompletion(anyString(), anyString())).thenReturn(RobotCmdResult.SUCCESS);
     }
 
+    // 导航命令按 cmd_id 匹配 COMPLETED 回执：future 成功完成并自动 ack RMS
     @Test
     void submitNavigation_success_completionByCmdIdCompletesFutureAndAcks() {
         RobotCommandExecutor.CommandHandle handle = executor.submitNavigation("R001", "F1", 1, 2, 3,
@@ -63,6 +64,7 @@ class RobotCommandExecutorTest {
         verify(gateway).ackCompletion("R001", "cmp-100");
     }
 
+    // 失败回执嵌套 raw_result.message：提取并人性化翻译（急停/错误码），结果携带回执
     @Test
     void failureReceipt_rawResultNestedMessage_extractedAndHumanized() {
         // RMS 契约：message/reject_reason/result_code 在 raw_result 嵌套对象里
@@ -86,6 +88,7 @@ class RobotCommandExecutorTest {
         assertThat(result.receipt()).isNotNull();
     }
 
+    // 失败回执降级提取 raw_result.data.msg：机器人原文进入 detail
     @Test
     void failureReceipt_robotDataMsg_extractedAsFallback() {
         // 机器人 result_report 原文在 raw_result.data.msg
@@ -104,6 +107,7 @@ class RobotCommandExecutorTest {
         assertThat(result.detail()).contains("已有在途任务");
     }
 
+    // 按 rmf_command_uid 匹配成功回执：future 成功完成
     @Test
     void completionByCommandUid_matches() {
         RobotCommandExecutor.CommandHandle handle = executor.submitActivity("R001", "charge", "tf-1", Map.of());
@@ -117,6 +121,7 @@ class RobotCommandExecutorTest {
         assertThat(handle.future().join().completed()).isTrue();
     }
 
+    // 失败回执（REJECTED）：future 以失败完成
     @Test
     void failureReceipt_completesFailed() {
         RobotCommandExecutor.CommandHandle handle = executor.submitActivity("R001", "dock", null, Map.of());
@@ -129,6 +134,7 @@ class RobotCommandExecutorTest {
         assertThat(handle.future().join().completed()).isFalse();
     }
 
+    // 回执 cmd_id 与在途命令不匹配：不消费该回执，命令保持 pending
     @Test
     void nonMatchingReceipt_keepsPending() {
         RobotCommandExecutor.CommandHandle handle = executor.submitActivity("R001", "dock", null, Map.of());
@@ -142,6 +148,7 @@ class RobotCommandExecutorTest {
         assertThat(handle.future()).isNotDone();
     }
 
+    // 网关返回 RETRY：自动重试下发直至成功，命令仍 pending 等待回执
     @Test
     void retryOnRetryableResult_untilSuccess() {
         when(gateway.navigate(anyString(), anyInt(), anyString(), anyDouble(), anyDouble(), anyDouble(),
@@ -157,6 +164,7 @@ class RobotCommandExecutorTest {
         assertThat(executor.hasPending("R001")).isTrue();
     }
 
+    // 网关返回 IMPOSSIBLE：立即失败不重试，pending 清除
     @Test
     void impossibleResult_failsImmediatelyWithoutRetry() {
         when(gateway.startActivity(anyString(), anyInt(), anyString(), any(), any()))
@@ -169,6 +177,7 @@ class RobotCommandExecutorTest {
         assertThat(executor.hasPending("R001")).isFalse();
     }
 
+    // abandon 主动放弃：future 以失败完成且 pending 清除
     @Test
     void abandon_completesFailedAndClearsPending() {
         RobotCommandExecutor.CommandHandle handle = executor.submitActivity("R001", "dock", null, Map.of());
@@ -179,6 +188,19 @@ class RobotCommandExecutorTest {
         assertThat(executor.hasPending("R001")).isFalse();
     }
 
+    // stop 透传网关送达结果（各枚举原样返回）：网络异常映射为 RETRY 可重试
+    @Test
+    void stop_returnsDeliveryResult_andNetworkFailureIsRetryable() {
+        for (RobotCmdResult result : RobotCmdResult.values()) {
+            when(gateway.stop(eq("R001"), anyInt(), anyInt(), isNull())).thenReturn(result);
+            assertThat(executor.stop("R001", 0, null)).isEqualTo(result);
+        }
+        when(gateway.stop(eq("R001"), anyInt(), anyInt(), isNull()))
+                .thenThrow(new IllegalStateException("network unavailable"));
+        assertThat(executor.stop("R001", 0, null)).isEqualTo(RobotCmdResult.RETRY);
+    }
+
+    // stop 下发：stop_cmd_id 取递增 seq，body_task_id 透传
     @Test
     void stop_dispatchesStopCommandWithBodyTaskId() {
         executor.submitNavigation("R001", "F1", 0, 0, 0, null, Map.of());
@@ -189,6 +211,7 @@ class RobotCommandExecutorTest {
         verify(gateway).stop(eq("R001"), eq(1), anyInt(), eq("biz-task-9"));
     }
 
+    // cmd_id 按机器人单调递增：第二条命令 cmd_id=2 且 uid 同步为 sched:R001:2
     @Test
     void cmdId_incrementsPerRobot() {
         RobotCommandExecutor.CommandHandle first = executor.submitActivity("R001", "dock", null, Map.of());
@@ -201,6 +224,7 @@ class RobotCommandExecutorTest {
         assertThat(second.uid()).isEqualTo("sched:R001:2");
     }
 
+    // abandon 后旧命令迟到回执：与新在途命令 cmd_id 不匹配，新命令不受影响
     @Test
     void lateReceipt_afterAbandon_doesNotAffectNewCommand() {
         RobotCommandExecutor.CommandHandle first = executor.submitActivity("R001", "dock", null, Map.of());

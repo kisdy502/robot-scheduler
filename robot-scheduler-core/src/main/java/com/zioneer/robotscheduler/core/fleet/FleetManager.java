@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>职责：
  * 1. 状态帧融合（坐标/电量/楼层映射/mode 推导/可派发判定）；
- * 2. stale 超时下线（15s 无有效帧 → offline + 释放交通占用，帧恢复自动上线）；
+ * 2. stale 超时下线（15s 无有效帧 → offline + 保留占用，恢复后确认停止再转为驻留）；
  * 3. decommission 处理（停用标记/清单消失 → 下线）；
  * 4. 离图检测（位置吸附失败 → 不可派发 + 30s 限频告警，回到图上自动恢复）；
  * 5. 外部任务保底（位置移动检测：上位机直发任务时调度侧判 busy，防止派发冲突）；
@@ -37,6 +37,15 @@ public class FleetManager {
 
     /** 连续静止帧数达到此值后解除移动标记。 */
     static final int STATIONARY_FRAMES_TO_CLEAR = 3;
+
+    /** 停止确认：连续 3 帧位置在 5cm、朝向在 0.1rad 内，避免复用普通移动检测的宽阈值。 */
+    static final double STOP_POSITION_TOLERANCE_METERS = 0.05;
+    static final double STOP_YAW_TOLERANCE_RADIANS = 0.1;
+    static final long STOP_RETRY_INTERVAL_MILLIS = 5000;
+    private final Map<String, StopObservation> stopObservations = new ConcurrentHashMap<>();
+    private final Map<String, Long> nextStopRetryAt = new ConcurrentHashMap<>();
+
+    private record StopObservation(double x, double y, double yaw, int frames) { }
 
     /** 机器人离开充电位超过此距离（米）自动释放充电桩。 */
     static final double CHARGER_RELEASE_DISTANCE_METERS = 2.0;
@@ -117,7 +126,7 @@ public class FleetManager {
     }
 
     /**
-     * stale 扫描：超过阈值无有效帧的机器人临时下线并释放交通占用（对齐旧栈 decommission_stale_robots）。
+     * stale 扫描：超过阈值无有效帧的机器人临时下线并保留交通占用，不能把失联当成道路已腾空。
      */
     @Scheduled(fixedDelay = 5000)
     public void sweepStaleRobots() {
@@ -141,27 +150,19 @@ public class FleetManager {
         releaseChargersOfOfflineRobots();
     }
 
-    /**
-     * 下线资源清理：交通占用/活动路线/充电桩占用一次性释放。
-     * 充电桩占用跟随在线状态（离线即释放，防止 9 桩被离线机器人占死；
-     * 机器人回到桩位后由驻留同步自动重新占用）。
-     */
+    /** 失联时保留路线与最后驻留；恢复在线后再核验停止，充电位也暂不释放。 */
     private void releaseResourcesForOffline(String robotCode) {
-        trafficRegistry.releaseAll(robotCode);
+        boolean first = trafficRegistry.retainUntilStopped(robotCode, "机器人下线，等待恢复后确认停止");
+        commandExecutor.abandon(robotCode, "机器人下线，导航结果未知");
+        stopObservations.remove(robotCode);
+        nextStopRetryAt.remove(robotCode);
         routeRegistry.clear(robotCode);
-        List<ChargerInfo> occupied = chargerPool.list(null).stream()
-                .filter(charger -> robotCode.equals(charger.getOccupiedBy()))
-                .toList();
-        occupied.forEach(charger -> chargerPool.release(robotCode, charger.getRmfWaypoint(), null));
-        if (!occupied.isEmpty()) {
-            log.info("机器人下线释放充电桩占用: robot={} chargers={}", robotCode,
-                    occupied.stream().map(ChargerInfo::getChargerId).toList());
-        }
+        if (first) log.warn("机器人下线，保留交通占用: robot={}", robotCode);
     }
 
     /**
-     * 充电桩占用对账：占用者不在线（含重启后 DB 残留的离线占用）→ 自动释放。
-     * 机器人重新上线停在桩上后由驻留同步自动恢复占用（秒级窗口，可接受）。
+     * 充电桩占用对账：未知占用者的历史残留可释放；已知失联机器人仍保留占用。
+     * 已知机器人恢复后依靠实际位置对账，不因离线自动腾出充电位。
      */
     private void releaseChargersOfOfflineRobots() {
         java.util.Set<String> onlineCodes = new java.util.HashSet<>();
@@ -172,7 +173,8 @@ public class FleetManager {
         }
         for (ChargerInfo charger : chargerPool.list(null)) {
             String occupier = charger.getOccupiedBy();
-            if (occupier != null && !onlineCodes.contains(occupier)) {
+            if (occupier != null && !onlineCodes.contains(occupier)
+                    && !trafficRegistry.isAwaitingStop(occupier)) {
                 chargerPool.release(occupier, charger.getRmfWaypoint(), null);
                 log.info("充电桩占用者已离线，自动释放: charger={} robot={}", charger.getChargerId(), occupier);
             }
@@ -200,13 +202,10 @@ public class FleetManager {
             RobotSnapshot snapshot = existing != null ? mergeFrame(existing, frame)
                     : mergeFrame(frame, frame);
             if (Boolean.TRUE.equals(frame.getRmsOffline())) {
-                // RMS 侧明确离线：保持记录、不可派发；资源释放（帧会持续刷新时间戳，
-                // stale 扫描兜底不到，必须在此路径直接释放）
+                // 明确离线与 stale 采用同样的保留策略，后续状态恢复再确认停止。
                 snapshot.setOnline(false);
                 snapshot.setDispatchable(false);
-                if (existing != null && existing.isOnline()) {
-                    releaseResourcesForOffline(snapshot.getRobotCode());
-                }
+                releaseResourcesForOffline(snapshot.getRobotCode());
             } else {
                 snapshot.setOnline(true);
             }
@@ -289,6 +288,10 @@ public class FleetManager {
      */
     private void updateDwellState(RobotSnapshot snapshot, boolean moving) {
         String robotCode = snapshot.getRobotCode();
+        if (trafficRegistry.isAwaitingStop(robotCode)) {
+            confirmStoppedFromFrame(snapshot);
+            return;
+        }
         if (!snapshot.isOnline()) {
             trafficRegistry.updateDwell(robotCode, null, null);
             return;
@@ -314,6 +317,57 @@ public class FleetManager {
         }
         trafficRegistry.updateDwell(robotCode, attachment.waypointId(), attachment.segmentId());
         syncChargerPoolFromDwell(robotCode, attachment.waypointId());
+    }
+
+    /** 只处理正常状态轮询中的停止确认，不根据定时器或缓存位置解除保留。 */
+    private void confirmStoppedFromFrame(RobotSnapshot snapshot) {
+        String robot = snapshot.getRobotCode();
+        var graph = mapManager.activeGraph().orElse(null);
+        if (!snapshot.isOnline() || isMapMismatch(snapshot) || graph == null || snapshot.getFloorId() == null
+                || commandExecutor.hasPending(robot) || !Double.isFinite(snapshot.getX())
+                || !Double.isFinite(snapshot.getY()) || !Double.isFinite(snapshot.getYaw())) {
+            stopObservations.remove(robot);
+            return;
+        }
+        if (!trafficRegistry.isStopAccepted(robot)) {
+            long now = System.currentTimeMillis();
+            if (now >= nextStopRetryAt.getOrDefault(robot, 0L)) {
+                nextStopRetryAt.put(robot, now + STOP_RETRY_INTERVAL_MILLIS);
+                if (commandExecutor.stop(robot, 0, null) == RobotCmdResult.SUCCESS) {
+                    trafficRegistry.markStopAccepted(robot);
+                }
+            }
+            // 本帧可能在 stop 送达前已采集，只作为停止请求触发，不计入确认帧。
+            stopObservations.remove(robot);
+            return;
+        }
+        GraphAttachment attachment = graph.attach(snapshot.getFloorId(), snapshot.getX(), snapshot.getY(),
+                SchedulerConstants.DWELL_WAYPOINT_THRESHOLD, SchedulerConstants.DWELL_SEGMENT_THRESHOLD);
+        if (!attachment.attached()) {
+            stopObservations.remove(robot);
+            return;
+        }
+        StopObservation previous = stopObservations.get(robot);
+        double yawDelta = previous == null ? 0 : Math.atan2(Math.sin(snapshot.getYaw() - previous.yaw()),
+                Math.cos(snapshot.getYaw() - previous.yaw()));
+        boolean stable = previous != null
+                && Math.hypot(snapshot.getX() - previous.x(), snapshot.getY() - previous.y())
+                        <= STOP_POSITION_TOLERANCE_METERS
+                && Math.abs(yawDelta) <= STOP_YAW_TOLERANCE_RADIANS;
+        StopObservation observation = stable
+                ? new StopObservation(previous.x(), previous.y(), previous.yaw(), previous.frames() + 1)
+                : new StopObservation(snapshot.getX(), snapshot.getY(), snapshot.getYaw(), 1);
+        stopObservations.put(robot, observation);
+        if (observation.frames() >= STATIONARY_FRAMES_TO_CLEAR
+                && trafficRegistry.confirmStopped(robot, attachment.waypointId(), attachment.segmentId())) {
+            stopObservations.remove(robot);
+            nextStopRetryAt.remove(robot);
+            syncChargerPoolFromDwell(robot, attachment.waypointId());
+            snapshot.setDispatchable(evaluateDispatchable(snapshot));
+            fleetStateMirror.upsert(snapshot);
+            log.info("机器人停止已确认，剩余预约转为实际驻留: robot={} waypoint={} segment={}",
+                    robot, attachment.waypointId(), attachment.segmentId());
+        }
     }
 
     /**
@@ -353,6 +407,7 @@ public class FleetManager {
      * 充电桩位置释放：机器人占用的充电桩，其桩位坐标与机器人当前位置距离超过阈值 → 自动释放。
      */
     private void releaseChargerIfDeparted(RobotSnapshot snapshot) {
+        if (!snapshot.isOnline() || trafficRegistry.isAwaitingStop(snapshot.getRobotCode())) return;
         String robotCode = snapshot.getRobotCode();
         String floorId = snapshot.getFloorId();
         if (floorId == null) {
@@ -471,7 +526,7 @@ public class FleetManager {
     }
 
     private boolean evaluateDispatchable(RobotSnapshot snapshot) {
-        if (!snapshot.isOnline()) {
+        if (trafficRegistry.isAwaitingStop(snapshot.getRobotCode()) || !snapshot.isOnline()) {
             return false;
         }
         String mode = snapshot.getMode();

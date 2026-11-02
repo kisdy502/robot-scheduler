@@ -3,23 +3,17 @@ package com.zioneer.robotscheduler.core.traffic;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-
-import java.util.ArrayList;
-import java.util.HashMap;
+import org.jgrapht.graph.DefaultDirectedGraph;
+import org.jgrapht.graph.DefaultEdge;
+import org.jgrapht.alg.connectivity.KosarajuStrongConnectivityInspector;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
-/**
- * 死锁监控：构建"占用→等待"图检测环路（A 占的资源被 B 等待，B 占的资源被 A 等待）。
- *
- * <p>等待意图由 TrafficRegistry 的 tryAcquire 失败记录驱动（登记于等待表）；
- * 检测到环仅告警（P4）：任务的占用重试超时机制会自然打破环（失败释放资源）；
- * P5 引入让路点导航做无损打破。</p>
- */
+/** 基于当前点/段占用解析等待关系；识别循环等待组，不自动释放资源或发让路指令。 */
 @Slf4j
 @Component
 public class DeadlockMonitor {
-
     private final WaitIntentRegistry waitIntents;
     private final TrafficRegistry trafficRegistry;
 
@@ -28,59 +22,34 @@ public class DeadlockMonitor {
         this.trafficRegistry = trafficRegistry;
     }
 
+    public Map<String, List<String>> waitingFor() {
+        var occupied = trafficRegistry.occupationSnapshot();
+        Map<String, List<String>> waiting = new TreeMap<>();
+        for (var intent : waitIntents.snapshot()) {
+            List<String> blockers = waitIntents.blockers(intent, occupied).stream()
+                    .map(WaitIntentRegistry.Blocker::robotCode).toList();
+            if (!blockers.isEmpty()) waiting.put(intent.robotCode(), blockers);
+        }
+        return java.util.Collections.unmodifiableMap(waiting);
+    }
+
     @Scheduled(fixedDelay = 5000)
     public List<List<String>> detect() {
-        Map<String, TrafficRegistry.OccupiedResources> occupation = trafficRegistry.occupationSnapshot();
-        Map<String, List<String>> waitingFor = new HashMap<>();
-        for (var intent : waitIntents.snapshot()) {
-            List<String> blockers = new ArrayList<>();
-            for (String segment : intent.segmentIds()) {
-                String owner = findOwner(occupation, segment);
-                if (owner != null && !owner.equals(intent.robotCode())) {
-                    blockers.add(owner);
-                }
-            }
-            if (!blockers.isEmpty()) {
-                waitingFor.put(intent.robotCode(), blockers);
-            }
+        var waiting = waitingFor();
+        var graph = new DefaultDirectedGraph<String, DefaultEdge>(DefaultEdge.class);
+        waiting.forEach((robot, blockers) -> {
+            graph.addVertex(robot);
+            blockers.forEach(graph::addVertex);
+        });
+        waiting.forEach((robot, blockers) -> blockers.forEach(blocker -> graph.addEdge(robot, blocker)));
+        List<List<String>> groups = new KosarajuStrongConnectivityInspector<>(graph).stronglyConnectedSets()
+                .stream().filter(group -> group.size() > 1)
+                .map(group -> group.stream().sorted().toList())
+                .sorted(java.util.Comparator.comparing(group -> group.get(0))).toList();
+        for (var group : groups) {
+            log.warn("检测到循环等待组: {}，等待关系={}；请检查离场路线和停靠点，超时不保证腾空道路",
+                    group, waiting.entrySet().stream().filter(entry -> group.contains(entry.getKey())).toList());
         }
-        List<List<String>> cycles = findCycles(waitingFor);
-        for (List<String> cycle : cycles) {
-            log.warn("检测到交通死锁环: {}（等待重试超时后将自动打破；P5 引入让路点无损打破）", cycle);
-        }
-        return cycles;
-    }
-
-    private String findOwner(Map<String, TrafficRegistry.OccupiedResources> occupation, String segment) {
-        for (var entry : occupation.entrySet()) {
-            if (entry.getValue().segmentIds().contains(segment)) {
-                return entry.getKey();
-            }
-        }
-        return null;
-    }
-
-    private List<List<String>> findCycles(Map<String, List<String>> waitingFor) {
-        List<List<String>> cycles = new ArrayList<>();
-        for (String start : waitingFor.keySet()) {
-            List<String> path = new ArrayList<>();
-            dfs(start, start, waitingFor, path, cycles);
-        }
-        return cycles;
-    }
-
-    private void dfs(String current, String target, Map<String, List<String>> waitingFor,
-                     List<String> path, List<List<String>> cycles) {
-        if (path.size() > 8 || path.contains(current)) {
-            if (current.equals(target) && path.size() >= 2) {
-                cycles.add(new ArrayList<>(path));
-            }
-            return;
-        }
-        path.add(current);
-        for (String next : waitingFor.getOrDefault(current, List.of())) {
-            dfs(next, target, waitingFor, path, cycles);
-        }
-        path.remove(path.size() - 1);
+        return groups;
     }
 }

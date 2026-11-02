@@ -28,8 +28,13 @@ public class ActiveRouteRegistry {
 
     /** 注册/覆盖机器人路线（同机新任务或停靠段导航会覆盖旧路线）。 */
     public void register(String robotCode, String taskId, String floorId, List<String> waypointIds) {
+        register(robotCode, taskId, floorId, waypointIds, mapManager.activeGraph().orElse(null));
+    }
+
+    /** 使用任务绑定的图解析坐标，避免注册路线时再次读取当前地图。 */
+    public void register(String robotCode, String taskId, String floorId, List<String> waypointIds,
+                         com.zioneer.robotscheduler.core.routing.NavigationGraph graph) {
         List<RouteWaypoint> waypoints = new ArrayList<>(waypointIds.size());
-        var graph = mapManager.activeGraph().orElse(null);
         for (String id : waypointIds) {
             Double x = null;
             Double y = null;

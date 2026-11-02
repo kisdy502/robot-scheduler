@@ -10,7 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
- * 地图热切换运行态清理：新图激活时清空旧图的交通占用与等待意图
+ * 地图热切换运行态清理：仅无任务绑定、无交通占用时允许切图，并清理旧等待意图与路线
  * （旧图资源 ID 在新图中无意义，保留会导致规划误判阻塞）。
  */
 @Slf4j
@@ -25,11 +25,11 @@ public class MapSwitchRuntimeCleaner {
 
     @PostConstruct
     void register() {
+        mapManager.setActivationBlocked(() -> !trafficRegistry.occupationSnapshot().isEmpty());
         mapManager.setOnActivated(() -> {
-            trafficRegistry.clearAll();
             waitIntentRegistry.clearAll();
             routeRegistry.clearAll();
-            log.info("地图热切换：已清空交通占用与等待意图");
+            log.info("地图切换前：已清理旧等待意图与活动路线");
         });
     }
 }

@@ -32,6 +32,12 @@ public class MockRobotManagementClient implements RobotManagementClient {
     private final List<String> commandLog = new CopyOnWriteArrayList<>();
 
     private final AtomicInteger rejectionCountdown = new AtomicInteger();
+    private final java.util.Set<String> noActiveTaskOnStop = ConcurrentHashMap.newKeySet();
+
+    /** 模拟 stop 的 NO_ACTIVE_TASK 幂等结果（客户端已归一为接受）。 */
+    public void injectNoActiveTaskOnStop(String robotCode) {
+        noActiveTaskOnStop.add(robotCode);
+    }
 
     public void injectInventory(RmsInventoryRobot robot) {
         inventoryByRobot.put(robot.getRobotCode(), robot);
@@ -112,6 +118,9 @@ public class MockRobotManagementClient implements RobotManagementClient {
     public RmsCommandResult stop(String robotCode, int runningCmdId, int stopCmdId, String bodyTaskId) {
         commandLog.add("stop:" + robotCode + ":" + runningCmdId + "->" + stopCmdId
                 + (bodyTaskId == null ? "" : ":" + bodyTaskId));
+        if (noActiveTaskOnStop.remove(robotCode)) {
+            return RmsCommandResult.accepted(Map.of("no_active_task", true));
+        }
         return acceptOrReject();
     }
 

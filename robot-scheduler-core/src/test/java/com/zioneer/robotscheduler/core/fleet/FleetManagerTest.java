@@ -84,6 +84,68 @@ class FleetManagerTest {
                 .thenReturn(java.util.Optional.empty());
     }
 
+    // 失联机器人（stale 清扫后保留交通）恢复：首帧触发 stop，请求送达本身不解除占用
+    // 预期：stop 被接受且连续 3 帧静止后才释放 future-route，转占物理路段 P1、不再占 WP_B
+    @Test
+    void lostRobot_recoversOnlyAfterStopAcceptedAndThreeStableFrames() {
+        mapManager.activateFromJson(SIMPLE_MAP, null, null);
+        fleetManager.onStateTick(List.of(frame("R001", 0, 0, 80.0, "F1")));
+        trafficRegistry.tryAcquire("R001", List.of("future-route"), java.util.Set.of("WP_B"), Duration.ofMinutes(1));
+        mirror.list().get(0).setUpdatedAtMillis(System.currentTimeMillis() - 16_000);
+        fleetManager.sweepStaleRobots();
+        assertThat(trafficRegistry.occupiedSegments()).contains("future-route");
+        assertThat(trafficRegistry.occupiedWaypoints()).contains("WP_A");
+        org.mockito.Mockito.when(stateGateway.stop(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.isNull()))
+                .thenReturn(RobotCmdResult.SUCCESS);
+        // 恢复第一帧触发 stop；请求送达本身不能解除占用。
+        fleetManager.onStateTick(List.of(frame("R001", 3, 0, 80.0, "F1")));
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
+        assertThat(mirror.list().get(0).isDispatchable()).isFalse();
+        for (int i = 0; i < 2; i++) fleetManager.onStateTick(List.of(frame("R001", 3, 0, 80.0, "F1")));
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
+        fleetManager.onStateTick(List.of(frame("R001", 3, 0, 80.0, "F1")));
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isFalse();
+        assertThat(trafficRegistry.occupiedSegments()).doesNotContain("future-route");
+        assertThat(trafficRegistry.occupiedSegments()).contains("P1#WP_A-WP_B");
+        assertThat(trafficRegistry.occupiedWaypoints()).doesNotContain("WP_B");
+    }
+
+    // 慢速微移不算停稳：awaiting stop 保持不释放，真正静止满 3 帧后才恢复可派
+    @Test
+    void slowMovement_doesNotCountAsStop_andStableFramesResumeDispatch() {
+        mapManager.activateFromJson(SIMPLE_MAP, null, null);
+        trafficRegistry.tryAcquire("R001", List.of("future-route"), java.util.Set.of("WP_B"), Duration.ofMinutes(1));
+        trafficRegistry.retainUntilStopped("R001", "timeout");
+        trafficRegistry.markStopAccepted("R001");
+        for (double x : new double[]{2, 2.1, 2.2, 2.3}) {
+            fleetManager.onStateTick(List.of(frame("R001", x, 0, 80.0, "F1")));
+        }
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
+        for (int i = 0; i < 3; i++) fleetManager.onStateTick(List.of(frame("R001", 2.3, 0, 80.0, "F1")));
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isFalse();
+        assertThat(mirror.list().get(0).isDispatchable()).isTrue();
+    }
+
+    // stop 被拒绝（IMPOSSIBLE）：位置再稳也保留交通占用且不可派，stop 仅下发一次不重试
+    @Test
+    void stopRejected_keepsTrafficEvenWhenPositionIsStable() {
+        mapManager.activateFromJson(SIMPLE_MAP, null, null);
+        trafficRegistry.tryAcquire("R001", List.of("future-route"), java.util.Set.of("WP_B"), Duration.ofMinutes(1));
+        trafficRegistry.retainUntilStopped("R001", "timeout");
+        org.mockito.Mockito.when(stateGateway.stop(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.isNull()))
+                .thenReturn(RobotCmdResult.IMPOSSIBLE);
+        for (int i = 0; i < 5; i++) fleetManager.onStateTick(List.of(frame("R001", 3, 0, 80.0, "F1")));
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
+        assertThat(trafficRegistry.occupiedSegments()).contains("future-route");
+        assertThat(mirror.list().get(0).isDispatchable()).isFalse();
+        org.mockito.Mockito.verify(stateGateway, org.mockito.Mockito.times(1)).stop(anyString(),
+                org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.isNull());
+    }
+
+    // 在线空闲机器人状态帧：镜像更新基础字段，推导 mode=idle 且可派发
     @Test
     void onStateTick_onlineIdleRobot_updatesMirrorWithDerivedMode() {
         fleetManager.onStateTick(List.of(frame("R001", 0.5, 0.1, 80.0, null)));
@@ -98,6 +160,7 @@ class FleetManagerTest {
         assertThat(snapshot.getFleetName()).isEqualTo("RG_20260407_00001");
     }
 
+    // RMS 地图名映射：按配置 L1→F1 写入楼层，同时保留原始地图名
     @Test
     void onStateTick_mapsRmsMapNameToFloorId() {
         properties.setMapNameMapping(Map.of("L1", "F1"));
@@ -108,6 +171,7 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).getMap()).isEqualTo("L1");
     }
 
+    // 机器人有进行中质检任务：下一状态帧推导 mode=running
     @Test
     void onStateTick_activeTaskDerivesRunningMode() {
         fleetManager.onStateTick(List.of(frame("R001", 1.0, 0.0, 80.0, null)));
@@ -119,6 +183,7 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).getMode()).isEqualTo("running");
     }
 
+    // 机器人有进行中充电任务：下一状态帧推导 mode=charging
     @Test
     void onStateTick_chargeTaskDerivesChargingMode() {
         fleetManager.onStateTick(List.of(frame("R001", 0.0, 0.0, 20.0, null)));
@@ -130,6 +195,7 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).getMode()).isEqualTo("charging");
     }
 
+    // 任务完成且位置连续静止：mode 回退为 idle
     @Test
     void onStateTick_completedTaskFallsBackToIdle() {
         fleetManager.onStateTick(List.of(frame("R001", 1.0, 0.0, 80.0, null)));
@@ -144,6 +210,7 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).getMode()).isEqualTo("idle");
     }
 
+    // 无任务记录但位置变化（上位机直发）：标记 running 不可派，静止满 3 帧后恢复 idle 可派
     @Test
     void onStateTick_externalMovementMarksRunning() {
         // 上位机直发任务（调度无任务记录），位置持续变化 → running 不可派（保底防冲突）
@@ -164,6 +231,7 @@ class FleetManagerTest {
         assertThat(settled.isDispatchable()).isTrue();
     }
 
+    // 移动中占物理路段不占点；停稳在 waypoint（0.5m 阈值内）后转为占点
     @Test
     void onStateTick_movingRobot_dwellsOnPhysicalSegmentOnly() {
         activateMap();
@@ -185,8 +253,9 @@ class FleetManagerTest {
         assertThat(trafficRegistry.occupiedWaypoints()).containsExactly("WP_B");
     }
 
+    // 已知失联机器人占用充电位：清扫不释放，且离线帧坐标不作"已离桩"证据
     @Test
-    void sweepStaleRobots_releasesChargerOccupancyForOfflineRobot() {
+    void sweepStaleRobots_retainsChargerOccupancyForKnownOfflineRobot() {
         com.zioneer.robotscheduler.core.charger.ChargerInfo charger =
                 new com.zioneer.robotscheduler.core.charger.ChargerInfo();
         charger.setChargerId("WP_A");
@@ -199,10 +268,15 @@ class FleetManagerTest {
         snapshot.setUpdatedAtMillis(System.currentTimeMillis() - 16_000);
 
         fleetManager.sweepStaleRobots();
+        activateMap();
+        // 离线帧坐标不应被用作“已离开充电位”的证据。
+        RobotSnapshot offline = frame("R001", 6, 0, 80.0, "F1");
+        offline.setRmsOffline(true);
+        fleetManager.onStateTick(List.of(offline));
 
-        // 下线清理 + 对账双路径都会释放（幂等），至少释放一次即可
+        // 已知失联机器人仍可能在桩上，不能仅因离线释放。
         org.mockito.Mockito.verify(chargerPoolMock,
-                org.mockito.Mockito.atLeastOnce()).release("R001", "WP_A", null);
+                org.mockito.Mockito.never()).release("R001", "WP_A", null);
     }
 
     @Test
@@ -222,8 +296,9 @@ class FleetManagerTest {
         org.mockito.Mockito.verify(chargerPoolMock).release("GONE_RBOT", "WP_A", null);
     }
 
+    // 退役（decommissioned）帧：机器人下线、mode=decommissioned，交通保留并等待 stop
     @Test
-    void onStateTick_decommissionedRobot_goesOfflineAndReleasesTraffic() {
+    void onStateTick_decommissionedRobot_goesOfflineAndRetainsTraffic() {
         fleetManager.onStateTick(List.of(frame("R001", 0.5, 0.0, 80.0, null)));
         trafficRegistry.tryAcquire("R001", List.of("P1#WP_A->WP_B"), java.util.Set.of("WP_B"),
                 Duration.ofSeconds(60));
@@ -236,9 +311,11 @@ class FleetManagerTest {
         assertThat(snapshot.isOnline()).isFalse();
         assertThat(snapshot.isDispatchable()).isFalse();
         assertThat(snapshot.getMode()).isEqualTo("decommissioned");
-        assertThat(trafficRegistry.occupiedSegments()).isEmpty();
+        assertThat(trafficRegistry.occupiedSegments()).isNotEmpty();
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
     }
 
+    // RMS 侧离线标志帧：机器人标记下线且不可派发
     @Test
     void onStateTick_rmsOfflineFlag_marksOffline() {
         RobotSnapshot offlineFrame = frame("R001", 0.5, 0.0, 80.0, null);
@@ -250,6 +327,7 @@ class FleetManagerTest {
         assertThat(snapshot.isDispatchable()).isFalse();
     }
 
+    // 位置远离拓扑图（离图）：在线但不可派发
     @Test
     void onStateTick_offGraphPosition_notDispatchable() {
         activateMap();
@@ -261,6 +339,7 @@ class FleetManagerTest {
         assertThat(snapshot.isDispatchable()).isFalse();
     }
 
+    // 位置在拓扑图附近（吸附成功）：可派发
     @Test
     void onStateTick_onGraphPosition_dispatchable() {
         activateMap();
@@ -270,6 +349,7 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).isDispatchable()).isTrue();
     }
 
+    // 楼层与激活地图不符（F2）：不可派发
     @Test
     void onStateTick_wrongFloor_notDispatchable() {
         activateMap();
@@ -279,6 +359,7 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).isDispatchable()).isFalse();
     }
 
+    // 未加载地图（无图模式）：跳过离图判定，仍可派发
     @Test
     void onStateTick_noMapLoaded_skipGraphCheck() {
         // 无图模式：不做离图判定，可派发
@@ -287,8 +368,9 @@ class FleetManagerTest {
         assertThat(mirror.list().get(0).isDispatchable()).isTrue();
     }
 
+    // 超过 stale 阈值被清扫：机器人下线、mode=unknown，交通保留并等待 stop
     @Test
-    void sweepStaleRobots_offlineAfterThresholdAndReleasesTraffic() {
+    void sweepStaleRobots_offlineAfterThresholdAndRetainsTraffic() {
         fleetManager.onStateTick(List.of(frame("R001", 0.5, 0.0, 80.0, null)));
         trafficRegistry.tryAcquire("R001", List.of("P1#WP_A->WP_B"), java.util.Set.of("WP_B"),
                 Duration.ofSeconds(60));
@@ -301,9 +383,11 @@ class FleetManagerTest {
         assertThat(swept.isOnline()).isFalse();
         assertThat(swept.isDispatchable()).isFalse();
         assertThat(swept.getMode()).isEqualTo("unknown");
-        assertThat(trafficRegistry.occupiedSegments()).isEmpty();
+        assertThat(trafficRegistry.occupiedSegments()).isNotEmpty();
+        assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
     }
 
+    // 清单同步缺失机器人：标记下线不可派，但仍保留在镜像中可见
     @Test
     void onInventorySync_missingRobot_goesOfflineButStaysVisible() {
         fleetManager.onStateTick(List.of(frame("R001", 0.5, 0.0, 80.0, null)));
@@ -315,6 +399,7 @@ class FleetManagerTest {
         assertThat(snapshot.isDispatchable()).isFalse();
     }
 
+    // 清单同步合并静态信息：home 点与兼容充电位写入镜像，在线状态不受影响
     @Test
     void onInventorySync_mergesStaticInfo() {
         fleetManager.onStateTick(List.of(frame("R001", 0.5, 0.0, 80.0, null)));
@@ -330,6 +415,7 @@ class FleetManagerTest {
         assertThat(snapshot.isOnline()).isTrue();
     }
 
+    // 状态源拉取异常：镜像保留现有快照不被清空
     @Test
     void pollStates_sourceFailure_keepsExistingMirror() {
         fleetManager.onStateTick(List.of(frame("R001", 0.5, 0.0, 80.0, null)));

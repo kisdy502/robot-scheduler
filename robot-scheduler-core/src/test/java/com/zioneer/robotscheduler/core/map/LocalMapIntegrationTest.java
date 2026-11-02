@@ -42,6 +42,7 @@ class LocalMapIntegrationTest {
         graph = NavigationGraph.from(metadata);
     }
 
+    // 场景：解析真实地图 map1022Pro；预期：元数据完整（published、单楼层 F1、点位≥13、路径≥11）
     @Test
     void parse_realMap_metadataComplete() {
         assertThat(metadata.getMapName()).isEqualTo("map1022Pro");
@@ -53,6 +54,7 @@ class LocalMapIntegrationTest {
         assertThat(floor.getPaths().size()).isGreaterThanOrEqualTo(11);
     }
 
+    // 场景：按类型查询图上点位；预期：充电位含 C1、停靠位含 H1
     @Test
     void graph_chargeAndParkingPoints_queryable() {
         List<WaypointMetadata> chargers = graph.waypointsByType("F1", WaypointType.CHARGE);
@@ -62,6 +64,7 @@ class LocalMapIntegrationTest {
         assertThat(parkings).extracting(WaypointMetadata::getId).contains("H1");
     }
 
+    // 场景：C1→W4 为贝塞尔曲线段；预期：段长度大于两点间直线距离
     @Test
     void graph_curveSegments_longerThanStraightLine() {
         // PATH_002 C1 -> W4 为贝塞尔曲线段，长度应大于直线距离
@@ -73,6 +76,7 @@ class LocalMapIntegrationTest {
         assertThat(segment.lengthMeters()).isGreaterThan(straight);
     }
 
+    // 场景：全图规划 C1→W1；预期：走 C1-W4-D1-W1 经典路径且总长超 25 米
     @Test
     void plan_acrossFullMap_c1ToW1() {
         // C1 -> W1 全图规划：C1-W4-D1-W1（经典路径）
@@ -83,6 +87,7 @@ class LocalMapIntegrationTest {
         assertThat(route.get().totalLengthMeters()).isGreaterThan(25.0);
     }
 
+    // 场景：封锁 C1-W4 段后规划 C1→W1；预期：经中部环绕行成功且不经过 W4
     @Test
     void plan_blockedSegment_findsAlternative() {
         // 封锁 C1-W4 段后 C1 -> W1 可走中部环：C1-P8-H2-...-W1（网状拓扑绕行能力）
@@ -95,6 +100,7 @@ class LocalMapIntegrationTest {
         assertThat(route.get().waypointIds()).doesNotContain("W4");
     }
 
+    // 场景：机器人真实坐标吸附到图；预期：停靠位附近坐标吸附到 H1
     @Test
     void attach_robotRealPosition_resolvesOnGraph() {
         // 停靠位附近吸附验证
@@ -102,6 +108,7 @@ class LocalMapIntegrationTest {
         assertThat(parkingNearby.waypointIdOptional()).contains("H1");
     }
 
+    // 场景：往返路径 waypoints=[T1,E1,T1]；预期：T1 与 E1 双向均可规划
     @Test
     void plan_roundTripPath_expandsBothDirections() {
         // PATH_006 waypoints=[T1,E1,T1]：T1 与 E1 双向连通
@@ -109,6 +116,7 @@ class LocalMapIntegrationTest {
         assertThat(graph.plan("F1", "E1", "T1", 1.0, null)).isPresent();
     }
 
+    // 场景：网状拓扑 H1 为 5 路枢纽；预期：到 W1/L1/P3/P4/P2 各方向均可达
     @Test
     void plan_meshTopology_multiRouteAvailable() {
         // 网状拓扑验证：H1 是 5 路枢纽，从 H1 应能到达多个方向

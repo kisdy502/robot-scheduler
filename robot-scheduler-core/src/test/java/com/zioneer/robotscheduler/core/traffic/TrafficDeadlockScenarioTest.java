@@ -30,6 +30,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(bAcquired).as("对向段应互斥：B 必须等待 A 通过").isFalse();
     }
 
+    // 场景：同一机器人重复申请自己已占的对向段；预期：放行（任务续占）
     @Test
     void sameRobot_canReuseOwnOppositeSegment() {
         // 同一机器人自己占的段不拦自己（任务续占场景）
@@ -39,6 +40,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(reacquired).isTrue();
     }
 
+    // 场景：A 通过单线段后释放；预期：B 对向申请成功（错峰通行）
     @Test
     void segmentReleased_afterRobotArrives_oppositeCanProceed() {
         // A 通过后释放，B 对向可通行（错峰通过）
@@ -63,6 +65,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(aAcquired).as("驻留点被 B 占用，A 应被拒（等待 B 离开）").isFalse();
     }
 
+    // 场景：查询驻留点归属；预期：被占点返回归属者，未占点返回 null
     @Test
     void dwellOwner_visibleForPrecisionError() {
         registry.updateDwell("B", "R1", null);
@@ -70,6 +73,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(registry.dwellOwner("P6")).isNull();
     }
 
+    // 场景：驻留机器人移动或离线后清除驻留；预期：点位释放，其他机器人可申请
     @Test
     void dwellCleared_whenRobotMoves_orOffline() {
         registry.updateDwell("B", "R1", null);
@@ -84,6 +88,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(aAcquired).isTrue();
     }
 
+    // 场景：驻留机器人换点 R1→T1；预期：旧驻留点自动释放、新点归属更新
     @Test
     void dwellOverwritten_whenRobotMovesToAnotherPoint() {
         // B 从 R1 移到 T1：旧驻留点自动释放
@@ -95,6 +100,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(registry.dwellOwner("T1")).isEqualTo("B");
     }
 
+    // 场景：机器人申请自己的驻留点；预期：放行（不拦自己）
     @Test
     void dwellDoesNotBlockOwnRobot() {
         // 机器人自己的驻留点不拦自己的任务
@@ -116,6 +122,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(aAcquired).as("路段被静止机器人占据，A 应被拒").isFalse();
     }
 
+    // 场景：驻留段进入占用段视图；预期：为规划层提供绕行输入
     @Test
     void dwellSegment_visibleInOccupiedSegments_forPlanningDetour() {
         // 驻留段进入 occupiedSegments → 规划层自动绕行输入
@@ -124,6 +131,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(registry.occupiedSegments()).contains("PATH_L#P1-P2");
     }
 
+    // 场景：驻留段机器人恢复移动或离线；预期：段释放，其他机器人可通行
     @Test
     void dwellSegmentCleared_whenRobotMovesOrOffline() {
         registry.updateDwell("B", null, "PATH_L#P1-P2");
@@ -138,6 +146,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(aAcquired).isTrue();
     }
 
+    // 场景：机器人申请自己驻留的段；预期：放行（恢复任务时重新通过该段）
     @Test
     void dwellSegment_doesNotBlockOwnRobot() {
         // 自己停的段不拦自己（恢复任务时重新通过该段）
@@ -147,6 +156,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(acquired).isTrue();
     }
 
+    // 场景：同时登记驻留点与驻留段（吸附边界情况）；预期：两者共存且归属查询正确
     @Test
     void dwellPointAndSegment_coexist() {
         // 同一机器人同时登记驻留点+驻留段（吸附点靠近 waypoint 但也在段上的边界情况）
@@ -157,6 +167,7 @@ class TrafficDeadlockScenarioTest {
         assertThat(registry.dwellSegmentOwner("PATH_L#P1-P2")).isEqualTo("B");
     }
 
+    // 场景：机器人从自己的驻留点出发规划；预期：不被自身驻留点堵死（JGraphT 修复验证）
     @Test
     void ownDwellPoint_doesNotBlockOwnPlanning() {
         // 回归：机器人 A 驻留自己的起点 P1，从 P1 规划出发不应被自己的驻留点堵死

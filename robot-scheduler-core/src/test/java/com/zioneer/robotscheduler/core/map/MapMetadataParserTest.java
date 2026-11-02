@@ -13,6 +13,7 @@ class MapMetadataParserTest {
 
     private final MapMetadataParser parser = new MapMetadataParser();
 
+    // 场景：速度字段非法（0/负数/溢出）；预期：拒绝解析，但禁区 maxSpeed=0 合法
     @Test
     void parse_invalidSpeed_rejectedButForbiddenZeroAccepted() {
         String template = """
@@ -35,6 +36,7 @@ class MapMetadataParserTest {
                 .isInstanceOf(MapMetadataException.class);
     }
 
+    // 场景：解析完整合法地图；预期：版本/楼层/点位/路径/区域约束全量还原
     @Test
     void parse_validMap_returnsFullStructure() {
         MapMetadata metadata = parser.parse("""
@@ -77,6 +79,7 @@ class MapMetadataParserTest {
         assertThat(floor.getZoneConstraints()).hasSize(1);
     }
 
+    // 场景：缺少 version 字段；预期：抛 MapMetadataException 并提示 version
     @Test
     void parse_missingVersion_throws() {
         assertThatThrownBy(() -> parser.parse("""
@@ -86,6 +89,7 @@ class MapMetadataParserTest {
                 .hasMessageContaining("version");
     }
 
+    // 场景：floors 为空数组；预期：抛 MapMetadataException 并提示 floor
     @Test
     void parse_noFloor_throws() {
         assertThatThrownBy(() -> parser.parse("""
@@ -95,6 +99,7 @@ class MapMetadataParserTest {
                 .hasMessageContaining("floor");
     }
 
+    // 场景：点位 ID 重复；预期：抛 MapMetadataException 并提示 unique
     @Test
     void parse_duplicateWaypointId_throws() {
         assertThatThrownBy(() -> parser.parse("""
@@ -113,6 +118,7 @@ class MapMetadataParserTest {
                 .hasMessageContaining("unique");
     }
 
+    // 场景：路径引用不存在的点位；预期：抛 MapMetadataException 并提示 unknown waypoint
     @Test
     void parse_pathReferencingUnknownWaypoint_throws() {
         assertThatThrownBy(() -> parser.parse("""
@@ -129,6 +135,7 @@ class MapMetadataParserTest {
                 .hasMessageContaining("unknown waypoint");
     }
 
+    // 场景：非法 JSON 文本；预期：抛 MapMetadataException 并提示解析失败
     @Test
     void parse_invalidJson_throws() {
         assertThatThrownBy(() -> parser.parse("not a json"))

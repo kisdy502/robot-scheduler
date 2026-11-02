@@ -70,7 +70,7 @@ PUT /api/v1/robot-management/robots/{id}
 
 - `POST /api/v1/robot-management/rmf/robots/{code}/stop`，body `{"running_cmd_id":"0","stop_cmd_id":"<seq>"}`
 - **不要带 body_task_id**：带未知任务 ID 返回 `10000 请求错误`；不带则停止当前活动任务（返回 `body_task_status: stopped` + 被停任务明细）
-- 无活动任务时返回 `NO_ACTIVE_TASK`（accepted=false），幂等安全
+- 无活动任务时返回 `NO_ACTIVE_TASK`（accepted=false）；HTTP 客户端仅对 stop 的明确 result_code=NO_ACTIVE_TASK 归一为幂等成功，其他拒绝保持三态映射。随后仍需状态帧确认位置稳定，才解除交通占用保留
 - 用途：本体任务状态机卡死（任务完成未关闭/导航目标未上报完成导致在途任务永挂）时清除；调度引擎 busy 拒绝防御（BODY_START_TASK_REJECTED → stop → 重试）即依赖此契约
 
 ## 地图一致性协议提案（待 RMS/本体侧排期）

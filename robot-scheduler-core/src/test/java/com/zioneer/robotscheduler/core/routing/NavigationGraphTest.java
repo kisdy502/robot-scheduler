@@ -24,6 +24,7 @@ class NavigationGraphTest {
 
     private final NavigationGraph graph = NavigationGraph.from(buildMap());
 
+    // 场景：A→C 直线走廊规划；预期：走最短路径 A-B-C（总长 6 米），ETA 按段限速计算为 6.75s
     @Test
     void plan_directRoute_usesShortestPath() {
         Optional<NavigationRoute> route = graph.plan("F1", "WP_A", "WP_C", 1.0, null);
@@ -35,6 +36,7 @@ class NavigationGraphTest {
         assertThat(route.get().etaSeconds()).isEqualTo(6.75);
     }
 
+    // 场景：封锁 A-B 段后规划 A→C；预期：走 A-D-B-C 绕行且长度为斜边+6 米
     @Test
     void plan_segmentBlocked_detoursAround() {
         // 封锁 A-B 段后走 A-D-B-C 绕行
@@ -46,6 +48,7 @@ class NavigationGraphTest {
         assertThat(route.get().totalLengthMeters()).isEqualTo(Math.hypot(3, 3) + 3.0 + 3.0);
     }
 
+    // 场景：B-D 段穿限速区且路径自带限速；预期：段限速取两者较小值 0.3，ETA=10s
     @Test
     void plan_slowDownZoneLimitsSegmentSpeed() {
         // 封锁 B-A 段后 B→D 只剩 B-D 直连：段限速 = min(path 0.5, slowDown 区 0.3) = 0.3
@@ -60,6 +63,7 @@ class NavigationGraphTest {
         assertThat(route.get().etaSeconds()).isEqualTo(10.0);
     }
 
+    // 场景：机器人速度上限 0.25 低于段限速 0.8；预期：有效速度取机器人上限，ETA=12s
     @Test
     void plan_robotSpeedCapsSegmentSpeed() {
         Optional<NavigationRoute> route = graph.plan("F1", "WP_A", "WP_B", 0.25, null);
@@ -69,12 +73,14 @@ class NavigationGraphTest {
         assertThat(route.get().etaSeconds()).isEqualTo(12.0);
     }
 
+    // 场景：E-F 唯一路径穿过禁行区；预期：该段不建边，规划无路
     @Test
     void plan_forbiddenZoneRemovesSegment() {
         // E-F 唯一路径穿过 forbidden 区 → 该段不建边，规划无路
         assertThat(graph.plan("F1", "WP_E", "WP_F", 1.0, null)).isEmpty();
     }
 
+    // 场景：D→E 为单向路径；预期：正向可达、反向不可达
     @Test
     void plan_unidirectionalPath_onlyOneDirection() {
         // D→E 单向：E 不能到 D
@@ -82,6 +88,7 @@ class NavigationGraphTest {
         assertThat(graph.plan("F1", "WP_E", "WP_D", 1.0, null)).isEmpty();
     }
 
+    // 场景：查询交通段 ID 构成；预期：格式为 路径ID#起点-终点，且可取回 pathId
     @Test
     void plan_segmentIdContainsPathAndWaypoints() {
         NavigationRoute route = graph.plan("F1", "WP_A", "WP_B", 1.0, null).orElseThrow();
@@ -90,6 +97,7 @@ class NavigationGraphTest {
         assertThat(route.segments().get(0).pathId()).isEqualTo("PATH_AB");
     }
 
+    // 场景：带途经点的路径参与规划；预期：B-VIA-C 展开为两个段
     @Test
     void plan_viaWaypointsExpandsToSegments() {
         // 封锁直连 B-C 段后走带途经点的 B-VIA-C 路径（两段）
@@ -101,6 +109,7 @@ class NavigationGraphTest {
         assertThat(route.get().segments()).hasSize(2);
     }
 
+    // 场景：坐标在点位吸附阈值内；预期：吸附到最近点位 WP_A
     @Test
     void attach_withinWaypointThreshold_attachesToWaypoint() {
         GraphAttachment attachment = graph.attach("F1", 0.4, 0.0, 3.0, 1.0);
@@ -109,6 +118,7 @@ class NavigationGraphTest {
         assertThat(attachment.waypointIdOptional()).contains("WP_A");
     }
 
+    // 场景：坐标超点位阈值但落在路段附近；预期：吸附到最近路段并返回垂距 0.2
     @Test
     void attach_onSegment_attachesToNearestSegment() {
         // (1.5, 0.2) 距 A、B 均超阈值，但在 A-B 段附近（垂距 0.2）
@@ -119,6 +129,7 @@ class NavigationGraphTest {
         assertThat(attachment.distanceMeters()).isEqualTo(0.2);
     }
 
+    // 场景：坐标远离图上所有要素；预期：吸附失败
     @Test
     void attach_farAway_returnsNone() {
         GraphAttachment attachment = graph.attach("F1", 50.0, 50.0, 3.0, 1.0);
@@ -126,6 +137,7 @@ class NavigationGraphTest {
         assertThat(attachment.attached()).isFalse();
     }
 
+    // 场景：按类型查询点位；预期：充电位仅返回 WP_A
     @Test
     void waypointsByType_returnsChargePoints() {
         List<WaypointMetadata> chargers = graph.waypointsByType("F1", WaypointType.CHARGE);
@@ -133,6 +145,7 @@ class NavigationGraphTest {
         assertThat(chargers).extracting(WaypointMetadata::getId).containsExactly("WP_A");
     }
 
+    // 场景：按 ID 或名称解析点位；预期：两者均可命中，未知值返回空
     @Test
     void waypointByIdOrName_resolvesBoth() {
         assertThat(graph.waypointByIdOrName("F1", "WP_B")).isPresent();
@@ -140,11 +153,13 @@ class NavigationGraphTest {
         assertThat(graph.waypointByIdOrName("F1", "WP_404")).isEmpty();
     }
 
+    // 场景：对不存在的楼层规划；预期：返回空而非异常
     @Test
     void unknownFloor_planReturnsEmpty() {
         assertThat(graph.plan("F9", "WP_A", "WP_B", 1.0, null)).isEmpty();
     }
 
+    // 场景：起点与目标相同（原地任务）；预期：返回单点零段路径，ETA 为 0
     @Test
     void plan_sameSourceAndGoal_returnsImmediateArrival() {
         // 原地任务（机器人已在目标点）：from==to 应返回单点路径而非异常（Set.of 重复元素回归）
@@ -157,6 +172,7 @@ class NavigationGraphTest {
         assertThat(route.get().etaSeconds()).isZero();
     }
 
+    // 场景：不同机器人速度改变最优路径选择；预期：慢速走短直路、快速走高速绕行路，且共享图状态不被修改
     @Test
     void plan_robotSpeedChangesBestRoute_withoutMutatingSharedGraph() {
         MapMetadata map = buildMap();
@@ -176,6 +192,7 @@ class NavigationGraphTest {
                 .containsExactly("WP_A", "WP_D", "WP_C");
     }
 
+    // 场景：非法机器人速度（0/负数/NaN/无穷）；预期：抛 IllegalArgumentException
     @Test
     void plan_invalidRobotSpeed_isRejected() {
         for (double speed : new double[]{0, -1, Double.NaN, Double.POSITIVE_INFINITY}) {

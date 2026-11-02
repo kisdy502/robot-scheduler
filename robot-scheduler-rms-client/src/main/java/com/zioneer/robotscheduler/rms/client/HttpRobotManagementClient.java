@@ -302,7 +302,12 @@ public class HttpRobotManagementClient implements RobotManagementClient {
                     .body(JsonNode.class);
             traceIn("POST /robots/" + robotCode + "/" + action + " 响应", root);
             JsonNode data = extractData(root);
-            RmsCommandResult result = toCommandResult(data, defaultRetriable);
+            // stop 的明确无活动任务响应是幂等成功；其他拒绝仍保留原有三态。
+            boolean noActiveTask = "stop".equals(action) && data != null
+                    && "NO_ACTIVE_TASK".equals(data.path("result_code").asText());
+            RmsCommandResult result = noActiveTask
+                    ? RmsCommandResult.accepted(Map.of("no_active_task", true))
+                    : toCommandResult(data, defaultRetriable);
             // 命令级访问日志（navigate/start-activity/stop/pause/resume/ack 低频，全量 INFO；
             // 定时轮询的 inventory/status 不在此出口，不打）
             log.info("RMS 请求: POST /robots/{}/{} cmd_id={} -> {}{} cost={}ms", robotCode, action,

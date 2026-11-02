@@ -56,18 +56,20 @@ public class LowBatteryChargeSupervisor {
      */
     @Scheduled(fixedDelayString = "${robot.scheduler.charge.scan-interval-millis:30000}")
     public void scan() {
-        cleanFinishedRetreats();
-        for (RobotSnapshot robot : fleetStateMirror.list()) {
-            if (!shouldRetreat(robot)) {
-                continue;
+        try (var admissionBinding = mapManager.bindTask()) {
+            cleanFinishedRetreats();
+            for (RobotSnapshot robot : fleetStateMirror.list()) {
+                if (!shouldRetreat(robot)) {
+                    continue;
+                }
+                Optional<ChargerInfo> charger = allocateCharger(robot);
+                if (charger.isEmpty()) {
+                    log.warn("低电量机器人无可用充电位: robot={} battery={}",
+                            robot.getRobotCode(), robot.getBattery());
+                    continue;
+                }
+                submitRetreat(robot, charger.get());
             }
-            Optional<ChargerInfo> charger = allocateCharger(robot);
-            if (charger.isEmpty()) {
-                log.warn("低电量机器人无可用充电位: robot={} battery={}",
-                        robot.getRobotCode(), robot.getBattery());
-                continue;
-            }
-            submitRetreat(robot, charger.get());
         }
     }
 

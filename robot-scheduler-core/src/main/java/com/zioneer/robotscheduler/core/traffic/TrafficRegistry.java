@@ -16,7 +16,7 @@ import java.util.Set;
  * <p>资源模型：路径段（segment，格式 {@code PATH_x#{minId}-{maxId}}，双向统一 ID 对向互斥）
  * + 点位（waypoint）两级离散占用；另含静止机器人驻留（dwell 点/段）。
  * 用法：任务开始前 {@link #tryAcquire} 原子占用整条路径，逐段通过后
- * {@link #releaseSegments} 渐进释放，任务终态 {@link #releaseAll} 全量释放。</p>
+ * {@link #releaseSegments} 渐进释放；正常到达接续驻留，异常由停止确认后释放多余预约。</p>
  *
  * <p>实现：单实例用 {@link InMemoryTrafficRegistry}；多实例演进见 docs/multi-instance-roadmap.md。</p>
  */
@@ -28,7 +28,7 @@ public interface TrafficRegistry {
      * @param robotCode    机器人编码
      * @param segmentIds   途经路径段 id 序列
      * @param waypointIds  途经关键点位 id（目标点、充电位等）
-     * @param lease        租约时长（超时自动释放，防机器人失联死锁）
+     * @param lease        预约时长提示（当前内存实现不自动到期释放，失联由停止确认流程处理）
      * @return true=占用成功；false=存在冲突（任务进入等待，不抛异常）
      */
     boolean tryAcquire(String robotCode, List<String> segmentIds, Set<String> waypointIds, Duration lease);
@@ -44,12 +44,36 @@ public interface TrafficRegistry {
     void releaseSegments(String robotCode, List<String> segmentIds);
 
     /**
-     * 释放机器人全部占用（任务结束/取消/下线）。
+     * 释放机器人路线预约；停止确认期间保留，物理驻留独立管理。
      */
     void releaseAll(String robotCode);
 
     /**
-     * 清空全部占用（地图热切换时旧图资源 ID 已失效）。
+     * 任务终态原子切换：同一把锁内"释放全部路线租约 + 登记终点驻留"。
+     *
+     * <p>解决幽灵窗口：先 releaseAll 再等状态帧登记驻留之间存在 0~2s 空档，
+     * 并发任务在该窗口拿到"空点"租约直达，与原地不动的车物理叠车（压测实测 P4 双车同点）。
+     * 本方法把驻留登记提前到引擎终态瞬间，窗口归零。</p>
+     *
+     * @param dwellWaypointId 终点 waypoint id（null/空 = 等价普通 releaseAll）
+     */
+    void releaseAllAndDwell(String robotCode, String dwellWaypointId);
+
+    /** 异常退出后冻结剩余预约和最后驻留；返回是否首次进入停止确认。 */
+    boolean retainUntilStopped(String robotCode, String reason);
+
+    boolean isAwaitingStop(String robotCode);
+
+    /** 仅表示停止请求被接受，仍需新状态帧确认实际静止。 */
+    void markStopAccepted(String robotCode);
+
+    boolean isStopAccepted(String robotCode);
+
+    /** 确认停止后，原子转为实际点/段驻留，释放多余预约。 */
+    boolean confirmStopped(String robotCode, String waypointId, String segmentId);
+
+    /**
+     * 清理可释放的路线预约；不强制解除停止确认保留或物理驻留。
      */
     default void clearAll() {
         occupationSnapshot().keySet().forEach(this::releaseAll);
@@ -73,7 +97,7 @@ public interface TrafficRegistry {
 
     /**
      * 更新机器人驻留（静止机器人的吸附点/段注册为交通障碍，均传 null 清除）。
-     * 驻留与任务占用分开管理：机器人开始移动/离线时清除，由 FleetManager 每帧驱动。
+     * 驻留与任务占用分开管理，由 FleetManager 每帧驱动；停止确认期间冻结，离线不清空。
      *
      * @param waypointId 吸附到的点位（机器人在点上）；可为 null
      * @param segmentId  吸附到的路径段（机器人停在两个点之间的路段中间）；可为 null

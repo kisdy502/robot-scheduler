@@ -63,16 +63,17 @@ public class RobotCommandExecutor {
                 cmdId -> gateway.startActivity(robotCode, cmdId, activity, label, description));
     }
 
-    /**
-     * 停止机器人（取消停机，best-effort：不等待回执）。
-     *
-     * @param bodyTaskId 业务任务 ID（RMS 契约：定位机器人当前活动任务）
-     */
-    public void stop(String robotCode, int runningCmdId, String bodyTaskId) {
+    /** 停止请求返回送达三态；成功接受后仍需状态帧确认实际停止。 */
+    public RobotCmdResult stop(String robotCode, int runningCmdId, String bodyTaskId) {
+        int cmdId = nextCmdId(robotCode);
         try {
-            gateway.stop(robotCode, runningCmdId, nextCmdId(robotCode), bodyTaskId);
+            RobotCmdResult result = gateway.stop(robotCode, runningCmdId, cmdId, bodyTaskId);
+            if (result == null) result = RobotCmdResult.RETRY;
+            log.info("停止请求: robot={} cmdId={} result={}", robotCode, cmdId, result);
+            return result;
         } catch (Exception e) {
-            log.warn("机器人 stop 命令下发失败（任务已取消，忽略）: robot={} error={}", robotCode, e.getMessage());
+            log.warn("停止请求失败: robot={} cmdId={} error={}", robotCode, cmdId, e.getMessage());
+            return RobotCmdResult.RETRY;
         }
     }
 

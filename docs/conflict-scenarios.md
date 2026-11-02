@@ -14,12 +14,12 @@
 | S3 | 路径段被占（网状拓扑可绕行） | Dijkstra 规划时排除被占段，自动绕行 | `NavigationGraph.plan + filterGraph` | 无需提示（自动绕行成功） |
 | S4 | 路径资源长期被占（等待超时） | 5 分钟持续等待后失败 | `TaskExecutionEngine.acquireTraffic`（TRAFFIC_WAIT_LIMIT_SECONDS=300） | `交通资源占用失败（等待 300s 超时）: 目标点 X 或必经路径被其他机器人长期占用` |
 | S5 | **单线对向**（场景二：A 去点2、B 去点1，仅一条路） | 对向段互斥：双向路径统一段 ID（无序点对 `PATH_x#{min,max}`），后到者等待先到者通过并释放 | `NavigationGraph.segmentId`（段 ID 生成） | 后到者排队等待；超时同 S4 |
-| S6 | 死锁环（A 等 B 的段、B 等 A 的段） | 死锁检测：等待意图图 DFS 环检测告警 + 等待超时自然打破（任务失败释放资源） | `DeadlockMonitor.detect` + `WaitIntentRegistry` | 日志：`检测到交通死锁环: [A, B]`；任务超时同 S4 |
+| S6 | 循环等待（A 等 B 的点/段、B 等 A 的点/段） | 循环等待检测：点/段依赖 + 强连通分量；超时可终止任务，但不会保证物理道路腾空 | `DeadlockMonitor.detect` + `WaitIntentRegistry` | 日志：`检测到循环等待组`及等待关系；任务消息列出占用者与资源 |
 | S7 | 全部机器人忙/不可派 | 自动分配排队 5s 重试，60s 超时 | `TaskExecutionEngine.retryPendingAssignments` | `自动分配超时：无可用机器人在 60s 内` |
 | S8 | 指定机器人离线/离图/外部任务中 | 机器人就绪等待 30s 超时 | `TaskExecutionEngine.waitForRobotReady` | `机器人不可派发（离线/离图），等待超时` |
 | S9 | 目标点位不存在 | 受理时立即校验 | `TaskExecutionEngine.executeGoal` | `目标点位不存在: XX999` |
 | S10 | 机器人导航被拒（RMS/机器人本体） | 命令重试 3 次后失败，回执原因透传 | `RobotCommandExecutor` + `TaskExecutionEngine` | `导航分段未完成 [A->B]: 命令回执失败: status=REJECTED`（含机器人返回的真实原因） |
-| S11 | 地图热切换 | 旧图交通占用全量清理 | `MapSwitchRuntimeCleaner` | 无提示（自动清理） |
+| S11 | 地图热切换 | 任务绑定/交通占用门禁；仅空闲时允许切换 | `MapManager + MapSwitchRuntimeCleaner` | 有任务或驻留占用时 HTTP 409 + Result(status=60409) |
 
 ## 两大死锁场景详解
 
@@ -68,7 +68,7 @@ A →→→ 点1 ===== 单线路径 ===== 点2 ←←← B
 | 规划规避（封锁段+封锁点过滤） | `NavigationGraph.plan/filterGraph` | 同上 |
 | 持续等待（冲突循环重试 300s） | `TaskExecutionEngine.acquireTraffic` | `core/task/TaskExecutionEngine.java` |
 | 分段导航（逐点下发+逐段释放） | `TaskExecutionEngine.navigateBySegments` | 同上 |
-| 死锁环检测（DFS） | `DeadlockMonitor.detect` | `core/traffic/DeadlockMonitor.java` |
+| 循环等待组检测（强连通分量） | `DeadlockMonitor.detect` | `core/traffic/DeadlockMonitor.java` |
 | 精准错误描述 | `TaskExecutionEngine.describeTrafficBlock` | `core/task/TaskExecutionEngine.java` |
 
 ## 验证状态
@@ -88,3 +88,7 @@ A →→→ 点1 ===== 单线路径 ===== 点2 ←←← B
 - **让路点导航**（死锁无损打破）：检测到死锁环时，牺牲者自动导航至最近 holding_point 让路，而非等待超时失败
 - **对向通行预约**（同段对向排队）：单线路对向等待时按到达先后排队放行（当前为先占先得）
 - **死锁主动告警接口**：DeadlockMonitor 检测结果推送观测页面
+
+## 导航异常后的占用保留
+
+正常到达继续使用 releaseAllAndDwell 原子交接。导航失败/超时、执行中取消和失联时保留剩余预约及最后驻留，并暂停该机器人的新导航。停止请求被接受后，连续三个在线状态帧位置稳定（5cm/0.1rad）且可吸附到图上，才原子转为实际点/段驻留。stop 被拒或网络失败时保留并间隔 5 秒重试；NO_ACTIVE_TASK 按幂等成功处理。排队任务取消不触发停止或占用保留，活动取消仍保持 completed+cancellation 契约。

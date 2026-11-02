@@ -81,11 +81,13 @@ class CostBasedTaskAssignerTest {
         return new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of());
     }
 
+    // 无任何候选机器人：select 返回空
     @Test
     void select_noCandidates_returnsEmpty() {
         assertThat(assigner.select(goalToB(), null, null)).isEmpty();
     }
 
+    // 两台空闲车电量相同：选 ETA 更近（离目标更近）的那台
     @Test
     void select_prefersCloserRobot() {
         mirror.upsert(robot("R_FAR", "fleet_A", 0.5, 80.0, "idle"));
@@ -96,6 +98,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_NEAR");
     }
 
+    // 低电量(8%)候选：电量惩罚压过分距离优势，选远但电量健康的车
     @Test
     void select_lowBatteryHeavilyPenalized() {
         // 近但低电量 vs 远但电量健康：BatteryAware 下选远者
@@ -107,6 +110,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_FAR_OK");
     }
 
+    // running 忙碌机器人被排除出候选：只能选中空闲的 R_IDLE
     @Test
     void select_busyRobotExcluded() {
         mirror.upsert(robot("R_BUSY", "fleet_A", 9.5, 90.0, "running"));
@@ -117,6 +121,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_IDLE");
     }
 
+    // 不可派发（dispatchable=false）机器人被排除：即使更近也不参选
     @Test
     void select_undispatchableRobotExcluded() {
         RobotSnapshot offline = robot("R_OFF", "fleet_A", 9.5, 90.0, "idle");
@@ -129,6 +134,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_ON");
     }
 
+    // 指定车队过滤：只从 fleet_A 候选中选择，其他车队机器人不参选
     @Test
     void select_fleetFilterApplies() {
         mirror.upsert(robot("R_OTHER_FLEET", "fleet_B", 9.5, 90.0, "idle"));
@@ -139,6 +145,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_TARGET_FLEET");
     }
 
+    // 指定车队内无任何机器人：select 返回空
     @Test
     void select_noRobotInFleet_returnsEmpty() {
         mirror.upsert(robot("R_B", "fleet_B", 9.5, 90.0, "idle"));
@@ -146,6 +153,7 @@ class CostBasedTaskAssignerTest {
         assertThat(assigner.select(goalToB(), "fleet_A", null)).isEmpty();
     }
 
+    // 唯一候选处于忙碌：全部排除后 select 返回空
     @Test
     void select_allBusy_returnsEmpty() {
         mirror.upsert(robot("R1", "fleet_A", 9.5, 90.0, "running"));
@@ -153,6 +161,7 @@ class CostBasedTaskAssignerTest {
         assertThat(assigner.select(goalToB(), null, null)).isEmpty();
     }
 
+    // 电量充足(85%)的充电机可中断参选但带打断代价：同等条件下空闲机胜出
     @Test
     void select_chargingSafeToInterrupt_candidatesWithInterruptPenalty() {
         // 电量充足（85%，预计任务后仍远高于返充线+余量=40%）：可中断参选，但带打断代价——
@@ -165,6 +174,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_IDLE_SAME");
     }
 
+    // 打断代价(5s)小于距离优势：中断近处充电机胜过派远处空闲机
     @Test
     void select_chargingSafe_beatsFarIdleWhenPenaltySmall() {
         // 打断代价注入 5s：近充机的距离优势（ETA 1s vs 19s）超过代价 → 中断充电响应
@@ -181,6 +191,7 @@ class CostBasedTaskAssignerTest {
         assertThat(selected).map(RobotSnapshot::getRobotCode).contains("R_CHARGING_NEAR");
     }
 
+    // 电量38%预计任务后低于返充线+余量：中断充电不安全，直接排除（返回空）
     @Test
     void select_chargingUnsafeToInterrupt_excluded() {
         // 电量 38%：预计任务后（38% - 耗电）< 返充线 30% + 余量 10% = 40% → 中断不安全，不参选

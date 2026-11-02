@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class TaskStateMirrorTest {
 
+    // 状态事件携带机器人：robot_code 回写自动分配的任务记录（已有值不覆盖），状态镜像同步落库
     @Test
     void eventWithRobot_writesBackRobotCodeToRecord() {
         TaskStateMirror mirror = new TaskStateMirror();

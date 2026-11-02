@@ -116,6 +116,22 @@ function StandbyNear($w, $parks) {
   return (Pick $top)
 }
 
+# ---- release enforcement: 20 robots vs <10 workstations — after QC/charge completes,
+# if the robot is still ON a workstation/charger (engine standby may have failed/timed out),
+# dispatch a forced move to a zone park point. Without this all W/C get occupied by idle
+# robots and every subsequent task deadlocks in traffic-wait. ----
+$script:needsLeave = @{}   # code -> $true once QC/charge dispatched (await idle -> check position)
+$script:stats.rest = 0
+
+$busyPoints = @($waypoints | Where-Object { $_.type -eq "workstation" -or $_.type -eq "charge" })
+function Near-BusyPoint($r) {
+  foreach ($p in $busyPoints) {
+    $dx = (RobotX $r) - $p.x; $dy = (RobotY $r) - $p.y
+    if ([Math]::Sqrt($dx * $dx + $dy * $dy) -lt 1.5) { return $p.id }
+  }
+  return $null
+}
+
 # ---- main loop ----
 $cycle = 0
 while ($true) {
@@ -132,6 +148,27 @@ while ($true) {
     $protected = $script:chargeProtectUntil[$code] -and [DateTime]::UtcNow -lt $script:chargeProtectUntil[$code]
     if ($r.mode -eq "charging" -or $protected) { continue }
 
+    # ---- step 1: leave busy point first (higher priority than new work) ----
+    if ($script:needsLeave.ContainsKey($code) -and $script:needsLeave[$code]) {
+      $blockedOn = Near-BusyPoint $r
+      if ($blockedOn) {
+        $rest = Pick $zones[$z].park
+        $ok = Dispatch @{
+          taskflow_id = "tf-zone-$ts"; task_id = "zone-rest-$cycle-$code-$ts"
+          task_template_type = "go_to_place"; nav_end_point = $rest.id
+          robot_code = $code
+        } "REST $code off $blockedOn -> $($rest.id) [zone $z]"
+        if ($ok) {
+          $script:stats.rest++
+          $script:needsLeave[$code] = $false   # move in flight; next work after it idles again
+        }
+        continue
+      } else {
+        $script:needsLeave[$code] = $false     # already off busy point (engine standby worked)
+      }
+    }
+
+    # ---- step 2: normal work (sets leave-pending for after completion) ----
     if ($null -ne $r.battery -and $r.battery -le $lowBattery) {
       $pos = @{ x = RobotX $r; y = RobotY $r }
       $c = NearestPoint $pos $chargers
@@ -143,6 +180,7 @@ while ($true) {
       } "charge->$($c.id) [zone $z] battery=$($r.battery)%"
       if ($ok) {
         $script:stats.ch++
+        $script:needsLeave[$code] = $true
         $script:chargeProtectUntil[$code] = [DateTime]::UtcNow.AddSeconds($chargeProtectSeconds)
       }
     } else {
@@ -155,13 +193,16 @@ while ($true) {
         robot_code = $code
         parameters = @{ task_template_code = "QC_CONTEXT"; end_point = $standbyId }
       } "QC->$($w.id) standby->$standbyId [zone $z]"
-      if ($ok) { $script:stats.qi++ }
+      if ($ok) {
+        $script:stats.qi++
+        $script:needsLeave[$code] = $true
+      }
     }
   }
 
   if ($cycle % 24 -eq 0) {
     $modes = ($robots | Group-Object mode | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
-    Log "[stats] cycle=$cycle QC=$($script:stats.qi) charge=$($script:stats.ch) fail=$($script:stats.fail) | $modes"
+    Log "[stats] cycle=$cycle QC=$($script:stats.qi) charge=$($script:stats.ch) REST=$($script:stats.rest) fail=$($script:stats.fail) | $modes"
   }
   Start-Sleep -Seconds 5
 }

@@ -105,12 +105,14 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
                                          String navTargetPoint, String robotGroup, String taskTemplateId,
                                          String taskTemplateCode, String earliestStartTime,
                                          Map<String, Object> parameters) {
-        if (navTargetPoint == null || navTargetPoint.isBlank()) {
-            throw SchedulerHttpException.badRequest("nav_target_point is required");
+        try (var admissionBinding = mapManager.bindTask()) {
+            if (navTargetPoint == null || navTargetPoint.isBlank()) {
+                throw SchedulerHttpException.badRequest("nav_target_point is required");
+            }
+            validateEarliestStartTime(earliestStartTime);
+            return createDispatchRecord(TaskCategories.GO_TO_PLACE, taskflowId, taskId, taskTemplateCode, robotCode,
+                    null, navTargetPoint, parameters, robotGroup, null);
         }
-        validateEarliestStartTime(earliestStartTime);
-        return createDispatchRecord(TaskCategories.GO_TO_PLACE, taskflowId, taskId, taskTemplateCode, robotCode,
-                null, navTargetPoint, parameters, robotGroup, null);
     }
 
     @Override
@@ -119,24 +121,26 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
                                             String taskTemplateType, String navStartPoint, String navEndPoint,
                                             String endAction, String earliestStartTime,
                                             Map<String, Object> parameters) {
-        if (taskTemplateType == null || taskTemplateType.isBlank()) {
-            throw SchedulerHttpException.badRequest("task_template_type is required");
+        try (var admissionBinding = mapManager.bindTask()) {
+            if (taskTemplateType == null || taskTemplateType.isBlank()) {
+                throw SchedulerHttpException.badRequest("task_template_type is required");
+            }
+            if (TaskCategories.REMOVED_TYPES.contains(taskTemplateType)) {
+                throw SchedulerHttpException.badRequest(
+                        "task_template_type '" + taskTemplateType + "' is no longer supported; use 'swap_battery'");
+            }
+            validateEndAction(endAction);
+            validateEarliestStartTime(earliestStartTime);
+            validateFleetGroupConsistency(fleetName, robotGroup);
+            String category = TaskCategories.normalize(taskTemplateType);
+            if (TaskCategories.RETURN_HOME.equals(category)) {
+                validateReturnHome(robotCode, navEndPoint, parameters);
+            }
+            // 目标点类型约束（受理即拒，不入队）：质检→作业点，充电→充电位
+            validateTargetPointType(category, navStartPoint, navEndPoint, parameters);
+            return createDispatchRecord(category, taskflowId, taskId, taskTemplateCode, robotCode,
+                    navStartPoint, navEndPoint, parameters, robotGroup, fleetName);
         }
-        if (TaskCategories.REMOVED_TYPES.contains(taskTemplateType)) {
-            throw SchedulerHttpException.badRequest(
-                    "task_template_type '" + taskTemplateType + "' is no longer supported; use 'swap_battery'");
-        }
-        validateEndAction(endAction);
-        validateEarliestStartTime(earliestStartTime);
-        validateFleetGroupConsistency(fleetName, robotGroup);
-        String category = TaskCategories.normalize(taskTemplateType);
-        if (TaskCategories.RETURN_HOME.equals(category)) {
-            validateReturnHome(robotCode, navEndPoint, parameters);
-        }
-        // 目标点类型约束（受理即拒，不入队）：质检→作业点，充电→充电位
-        validateTargetPointType(category, navStartPoint, navEndPoint, parameters);
-        return createDispatchRecord(category, taskflowId, taskId, taskTemplateCode, robotCode,
-                navStartPoint, navEndPoint, parameters, robotGroup, fleetName);
     }
 
     @Override

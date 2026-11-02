@@ -43,6 +43,9 @@ public enum ErrorCode {
     /** 任务尚未收到调度内核任务 ID，无法取消。 */
     SCHEDULER_TASK_ID_NOT_READY(60402, "任务尚未收到调度内核任务 ID，无法取消"),
 
+    /** 地图仍被任务或交通资源使用，拒绝激活。 */
+    SCHEDULER_MAP_SWITCH_CONFLICT(60409, "地图正在使用，暂不可切换"),
+
     /** 自动机器人分配暂不可用，robot_code 当前必填（保持旧接口 501 语义）。 */
     SCHEDULER_ROBOT_ALLOCATION_UNSUPPORTED(60501, "automatic robot allocation requires fleet state integration; robot_code is required for now"),
 

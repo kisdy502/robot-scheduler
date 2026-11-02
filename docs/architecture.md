@@ -31,10 +31,17 @@ robot-scheduler/
 | 类 | 职责 | 关键方法 |
 |---|---|---|
 | `MapMetadataParser` | 单 json 元数据解析 + 结构校验（独立 ObjectMapper，防全局 snake_case 污染） | `parse(json)` → MapMetadata；校验 version/published/点位唯一/路径引用完整 |
-| `MapManager` | 地图生命周期：热切换（上传即激活，volatile 原子替换） | `activateFromJson`（上传激活+存档）、`loadFromArchive`（启动 DB 优先）、`activeGraph()`（获取运行图）、`activeFloorId()` |
+| `MapManager` | 地图生命周期：任务绑定与受控切换（单快照原子发布） | `activateFromJson`（上传激活+存档）、`loadFromArchive`（启动 DB 优先）、`activeGraph()`（获取运行图）、`activeFloorId()` |
 | `MapMetadata` 等 | 领域模型（严格对齐地图编辑器 json 契约） | 版本状态机（仅 published 可激活）、13 种点位类型、曲线段（贝塞尔）、区域约束 |
 
-**使用**：`POST /api/v1/maps/upload` 上传 → MapManager 激活 → 触发 `MapSwitchRuntimeCleaner` 清空旧图交通占用。
+**使用**：`POST /api/v1/maps/upload` 上传 → 校验 published → 检查任务绑定与交通占用 → 构图与清理旧运行态 → 存档 → 原子发布新快照。冲突返回 HTTP 409 + Result（status=60409），不修改当前地图或存档。
+
+- `MapSnapshot` 一次绑定 mapName、version、generation、元数据、图、加载时间与附件路径；generation 仅为当前进程内的激活代次。
+- 门面在地图相关校验前获得短期绑定，提交到引擎后由任务绑定接续；自动返充同样保护选桩到提交的窗口。
+- 引擎在接纳时绑定地图，排队、自动分配等待、规划、分段导航、充电改派与结束停靠始终使用该版本。终态 detail.map_binding 记录地图名、版本和代次。
+- 任务状态移除不立即解除运行中绑定，必须等执行线程退出；排队取消、自动分配超时、提交异常会回收绑定。接纳与激活共用生命周期锁，避免检查后又进任务的竞态。
+- 保守切图策略：有绑定，或仍存在交通占用（包括驻留）时拒绝激活；不能通过切图清空在用资源。上传、本地文件、存档加载均受同一门禁约束。
+- 调度版本绑定不代表 RMS 已加载相同版本；当前南向协议缺少可核验的地图版本信息。失败/取消/失联后的占用保留与停止确认见下文交通生命周期。
 
 ### 2.2 routing 包 —— 路径规划
 
@@ -59,16 +66,25 @@ robot-scheduler/
 |---|---|---|
 | `TrafficRegistry` | 占用端口（段+点+驻留三级） | `tryAcquire(robot, segments, waypoints, lease)` 原子占用；`releaseSegments` 渐进释放；`updateDwell(robot, wpId, segId)` 驻留登记；`occupiedSegments/Waypoints` 规划障碍输入 |
 | `InMemoryTrafficRegistry` | 默认实现（synchronized 单锁，<500 台够用） | 冲突判定含：任务占用互斥 + 驻留点/段互斥 + 对向段互斥（统一 ID 天然实现） |
-| `DeadlockMonitor` | 死锁环检测（等待意图图 DFS，5s 周期） | `detect()` → 环列表（目前告警级，超时自然打破） |
-| `WaitIntentRegistry` | 等待意图登记（占用失败时记录，死锁检测输入） | `record(robot, segments)` / 2 分钟自动过期 |
+| `DeadlockMonitor` | 循环等待组检测（点/段依赖 + 强连通分量，5s 周期） | `detect()` → 循环等待组（告警级，不自动让路） |
+| `WaitIntentRegistry` | 等待意图登记（点/段 + 所属任务，规划失败/申请失败/段前复检均覆盖） | `record(robot, task, segments, waypoints)` / 持续刷新，退出等待按任务清理 |
 
 **占用生命周期**：
 ```
 任务受理 → tryAcquire 整条路径（全有或全无，冲突循环等待 300s）
   → 逐段导航，每到达一个途经点 releaseSegments 释放身后段（渐进）
-  → 任务终态 releaseAll 全量释放
+  → 正常到达 releaseAllAndDwell 原子转为目标驻留
+  → 导航异常/取消/失联：保留剩余预约，stop 接受后连续 3 帧稳定位置确认，再转为实际驻留
 静止机器人 → FleetManager 每帧 updateDwell（吸附点+段），移动即清除
 ```
+
+**常见异常处理**：导航未确认完成、执行中取消或机器人失联时，冻结剩余路线预约与最后驻留，停止确认期间不可接收新导航，也不能切图。在线状态帧确认停止后，原子改为实际所在点/段驻留，再释放多余预约。停止请求失败时按 5 秒间隔重试；不因等待时间到期自动释放交通占用。
+
+停止确认采用固定的轻量规则：stop 请求已接受（或 RMS 明确返回 `NO_ACTIVE_TASK`）、无本地待回执命令、地图匹配且可吸附、连续 3 个在线状态帧位置在 5cm 内且朝向在 0.1rad 内。恢复后的首帧仅用于触发 stop，不计入确认。已知离线机器人占用的充电位也保留，恢复后按实际位置对账。此流程处理常见运行异常，不增加持久化异常状态机或强制解锁接口。
+
+**等待关系诊断**：动态占用过滤后无路时，额外计算一条忽略动态占用的静态候选路线，用于记录点/段阻塞，不申请也不下发该候选路线。静态图本身无路则立即报告拓扑/方向/禁区问题，不登记机器人等待关系。段前复检也持续登记等待资源，通行、取消、终态或超时退出时按任务 ID 清理。
+
+监控每轮使用当前占用快照，解析所有资源占用者（包括多个驻留者），排除自身，并用强连通分量识别循环等待组，避免原有 8 层深度限制和重复环。普通排队（例如 20 台机器人等待 9 个正在作业的机器人）不构成循环等待。静态候选路线只提供诊断依赖，存在多条替代路线时，循环等待告警不能视为“已经证明所有解法均不可能”；当前不自动释放资源或发送让路命令。
 
 ### 2.4 task 包 —— 任务执行
 

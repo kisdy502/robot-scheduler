@@ -98,6 +98,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // assign-task 指定 robot_code：分配成功，data 回带 robot_code 且任务流占用登记生效
     @Test
     void assignTask_withRobotCode_returnsRobotCodeData() {
         Map<String, Object> data = facade.assignTask("1001", null, "R009", null, null, null, null);
@@ -106,6 +107,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(assignmentRegistry.isAssigned("1001")).isTrue();
     }
 
+    // assign-task 起始导航点缺省：仅传 robot_code 也能正常分配并返回 robot_code
     @Test
     void assignTask_allowsMissingNavPointStart() {
         Map<String, Object> data = facade.assignTask("1001", null, "R001", null, null, null, null);
@@ -113,6 +115,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data).containsEntry("robot_code", "R001");
     }
 
+    // release-robot 缺省 robot_code：释放该任务流下全部机器人指派，data 为 null 且占用登记清空
     @Test
     void releaseRobot_withoutRobotCode_releasesTaskflowAssignments() {
         facade.assignTask("1001", null, "R001", null, null, "P001", null);
@@ -124,6 +127,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(assignmentRegistry.isAssigned("1001")).isFalse();
     }
 
+    // release-robot 缺少 taskflow_id：返回 400
     @Test
     void releaseRobot_withoutTaskflowId_returns400() {
         assertThatThrownBy(() -> facade.releaseRobot("", "R001"))
@@ -148,6 +152,7 @@ class DefaultSchedulerFacadeTest {
         assertThat((String) data.get("message")).contains("正在等待调度方确认");
     }
 
+    // goto-place 导航目标点为空白：返回 400
     @Test
     void gotoPlace_withoutNavTargetPoint_returns400() {
         assertThatThrownBy(() -> facade.gotoPlace("1001", "2001", "R001", " ",
@@ -167,6 +172,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(record.getCategory()).isEqualTo(TaskCategories.SWAP_BATTERY);
     }
 
+    // dispatch_task 传已废弃的 replace_battery/replaceBattery 类别名：返回 400，detail 提示改用 swap_battery
     @Test
     void dispatchTask_rejectsRemovedReplaceBatteryNames() {
         for (String removed : List.of("replace_battery", "replaceBattery")) {
@@ -181,6 +187,7 @@ class DefaultSchedulerFacadeTest {
         }
     }
 
+    // dispatch_task 传非法 end_action（invalid）：返回 400
     @Test
     void dispatchTask_rejectsInvalidEndAction() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-1", null, null, null, null, null,
@@ -189,6 +196,7 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(400));
     }
 
+    // dispatch_task 的 earliest_start_time 非数字：返回 400
     @Test
     void dispatchTask_rejectsInvalidEarliestStartTime() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-1", null, null, null, null, null,
@@ -197,6 +205,7 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(400));
     }
 
+    // dispatch_task 同时传 fleet_name 与 robot_group 且不一致：返回 400，detail 提示二者必须匹配
     @Test
     void dispatchTask_rejectsMismatchedFleetAndRobotGroup() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-1", null, "RG001", "RG002", null, null,
@@ -209,6 +218,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // dispatch_task return_home 未指定 robot_code：返回 400，detail 固定为 robot_code is required for return_home
     @Test
     void dispatchTask_returnHome_rejectsMissingRobotCode() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-home", null, null, "RG001", null, null,
@@ -221,6 +231,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // dispatch_task return_home 缺 home_waypoint 且缺 nav_end_point：返回 400，detail 提示回家点参数必填
     @Test
     void dispatchTask_returnHome_rejectsMissingHomeWaypoint() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-home", "R001", null, "RG001", null, null,
@@ -234,6 +245,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // dispatch_task returnHome 别名的 home_waypoint 与 nav_end_point 指向不同点：返回 409 冲突
     @Test
     void dispatchTask_returnHome_rejectsHomeWaypointConflict() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-home", "R001", null, null, null, null,
@@ -242,6 +254,7 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(409));
     }
 
+    // dispatch_task return_home 仅传 nav_end_point 作为回家点：受理成功，发布 published 且类别归档为 return_home
     @Test
     void dispatchTask_returnHome_usesNavEndPointAsHomeWaypoint() {
         Map<String, Object> data = facade.dispatchTask("tf", "task-home", "R001", null, null, null, null,
@@ -261,6 +274,7 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(400));
     }
 
+    // stop-task 任务记录不存在：返回 404，detail 固定为 task status record not found
     @Test
     void stopTask_missingRecord_returns404() {
         assertThatThrownBy(() -> facade.stopTask("missing-task", null, null, null))
@@ -272,6 +286,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // stop-task 任务尚未收到 rmf_task_id（内核未受理）：返回 409，提示不可取消
     @Test
     void stopTask_requiresRmfTaskIdBeforeCancel() {
         facade.dispatchTask("tf", "task-1", "R001", null, null, null, null,
@@ -287,6 +302,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // stop-task 按任务 ID 取消进行中任务：task/dispatch_status 均置 cancel_requested，落库取消原因并回带 rmf_task_id
     @Test
     void stopTask_byTaskId_marksCancelRequested() {
         String requestId = dispatchAndInjectKernelTask("task-1", "R001", "qi.dispatch-1", "underway");
@@ -304,6 +320,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(record.getCancelRequest()).containsEntry("reason", "operator request");
     }
 
+    // stop-task 缺任务 ID、按 robot_code 取消：命中该机器人最新一条未终态任务（跳过已完成任务）
     @Test
     void stopTask_byRobotCode_usesLatestActiveTask() {
         dispatchAndInjectKernelTask("task-old", "R001", "qi.dispatch-old", "completed");
@@ -315,6 +332,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data).containsEntry("rmf_task_id", "qi.dispatch-new");
     }
 
+    // stop-task 重复取消已 cancel_requested 的任务：幂等，任务仍可寻址且状态保持 cancel_requested
     @Test
     void stopTask_cancelRequestedTask_staysAddressable() {
         dispatchAndInjectKernelTask("task-1", "R001", "qi.dispatch-1", "underway");
@@ -340,6 +358,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(record.getDispatchStatus()).isEqualTo(DispatchStatus.RMF_RESPONSE_RECEIVED);
     }
 
+    // 查询任务状态：返回最新快照，rmf_task_id/task_status/execution_final/raw.task_state 均正确回显
     @Test
     void queryTaskStatus_returnsLatestTaskStateSnapshot() {
         seedRobot("R001", "RG001", "idle");
@@ -362,6 +381,7 @@ class DefaultSchedulerFacadeTest {
                 .containsEntry("status", "completed");
     }
 
+    // 查询任务状态但记录不存在：返回 404，detail 携带任务 ID
     @Test
     void queryTaskStatus_missingRecord_returns404WithDetail() {
         assertThatThrownBy(() -> facade.queryTaskStatus("missing"))
@@ -373,6 +393,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // 按 scheduler_request_id 查询任务状态：同一 business_task_id 重复派发的两条请求相互隔离，仅已受理记录回填 rmf_task_id
     @Test
     void queryTaskStatus_byRequestId_keepsDuplicateBusinessTasksIsolated() {
         seedRobot("R001", "RG001", "idle");
@@ -391,6 +412,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(secondStatus).containsEntry("rmf_response_received", false);
     }
 
+    // 查询已发布但内核尚未受理的任务：task_status=queued、dispatch_status=published、execution_final=false
     @Test
     void queryTaskStatus_publishedWithoutKernelTask_showsQueued() {
         seedRobot("R001", "RG001", "idle");
@@ -404,6 +426,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data.get("execution_final")).isEqualTo(false);
     }
 
+    // 按空白 scheduler_request_id 查询任务状态：返回 400
     @Test
     void queryTaskStatus_byEmptyRequestId_returns400() {
         assertThatThrownBy(() -> facade.queryTaskStatusByRequestId(" "))
@@ -434,6 +457,7 @@ class DefaultSchedulerFacadeTest {
         assertThat((Map<String, Object>) task.get("raw")).containsKey("task_state");
     }
 
+    // list-tasks 运行中任务心跳超时（>10s）：标记为 stale，message 提示 timeout
     @Test
     void listTasks_marksStaleRunningTaskState() {
         taskStateMirror.upsert(new TaskStateEvent("go_to_place.rmf-stale-001", "running",
@@ -450,6 +474,7 @@ class DefaultSchedulerFacadeTest {
         assertThat((String) task.get("message")).contains("timeout");
     }
 
+    // list-tasks 按 robot_code 过滤：仅返回该机器人的任务
     @Test
     void listTasks_filtersByRobotCode() {
         taskStateMirror.upsert(new TaskStateEvent("go_to_place.rmf-robot-001", "running",
@@ -466,6 +491,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(tasks.get(0)).containsEntry("robot_code", "R002");
     }
 
+    // list-tasks execution_final=true：包含终态任务、回显 execution_final_included=true 且不返回 raw 字段
     @Test
     void listTasks_executionFinalTrue_includesTerminal() {
         taskStateMirror.upsert(new TaskStateEvent("qi.rmf-completed-001", "completed",
@@ -480,6 +506,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(tasks.get(0)).doesNotContainKey("raw");
     }
 
+    // list-tasks limit 非法（0）：返回 400
     @Test
     void listTasks_invalidLimit_returns400() {
         assertThatThrownBy(() -> facade.listTasks(null, false, null, 0, true))
@@ -498,6 +525,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data).containsEntry("charger_waypoint", "charger_A");
     }
 
+    // assign-charger 无任何可用充电桩：返回 409，detail 固定为 no charger is available
     @Test
     void assignCharger_noAvailable_returns409() {
         assertThatThrownBy(() -> facade.assignCharger("R001", null, null))
@@ -509,6 +537,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // assign-charger 指定候选桩但候选全部被占：返回 409，detail 固定为 no candidate charger is available
     @Test
     void assignCharger_candidateUnavailable_returns409WithCandidateDetail() {
         chargerPool.register(charger("charger_A", "charger_A", "charger"));
@@ -524,6 +553,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // assign-charger 缺少 robot_code：返回 400
     @Test
     void assignCharger_requiresRobotCode_returns400() {
         assertThatThrownBy(() -> facade.assignCharger(" ", null, null))
@@ -531,6 +561,7 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(400));
     }
 
+    // assign-charger 按 resource_type=swap_station 过滤：跳过普通充电桩，分配到换电站点位
     @Test
     void assignSwapStation_withResourceTypeFilter() {
         chargerPool.register(charger("charger_A", "charger_A", "charger"));
@@ -541,6 +572,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data).containsEntry("charger_waypoint", "swap_1");
     }
 
+    // release-charger 释放充电桩：data 为 null，且释放后该桩可被其他机器人重新分配
     @Test
     void releaseCharger_thenReassignable() {
         chargerPool.register(charger("charger_A", "charger_A", "charger"));
@@ -553,6 +585,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(second).containsEntry("charger_waypoint", "charger_A");
     }
 
+    // release-charger 缺少释放目标（robot_code/桩标识空白）：返回 400
     @Test
     void releaseCharger_requiresTarget_returns400() {
         assertThatThrownBy(() -> facade.releaseCharger(null, " ", null))
@@ -560,12 +593,14 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(400));
     }
 
+    // robot-resources/release-resources 机器人无占用资源：查询返回空 Map，释放返回 null
     @Test
     void robotResources_returnsEmptyMap_andReleaseResourcesReturnsNull() {
         assertThat(facade.robotResources("R001")).isEqualTo(Map.of());
         assertThat(facade.releaseResources("R001")).isNull();
     }
 
+    // release-resources 缺少 robot_code：返回 400
     @Test
     void releaseResources_requiresRobotCode_returns400() {
         assertThatThrownBy(() -> facade.releaseResources(""))
@@ -585,6 +620,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data.get("runtime_reload")).isNotNull();
     }
 
+    // scene-resource-status 未加载地图（空 MapManager）：返回 configured=false、status=not_loaded 结构，含 loaded_at/rmf_levels
     @Test
     void sceneResourceStatus_returnsNotLoadedStructure() {
         // 无图专属 facade（setUp 默认加载了类型校验测试地图）
@@ -618,6 +654,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(repository.findByBusinessTaskId("task-1")).isEmpty();
     }
 
+    // dispatch_task 自动分配且 RMS 无任何可见机器人：fail-fast 返回 409，detail 含 no robot is visible
     @Test
     void dispatchTask_autoAssign_noRobotsAtAll_returns409Fast() {
         assertThatThrownBy(() -> facade.dispatchTask("tf", "task-1", null, null, null, null, null,
@@ -630,6 +667,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // dispatch_task 自动分配时机器人可见但瞬时不可调度（充电中）：不拦截，任务照常发布进入排队
     @Test
     void dispatchTask_autoAssign_robotsPresentButNotDispatchable_staysQueued() {
         // 有机器人但全部忙碌/离线：瞬时不可用，不拦截，走排队等待语义
@@ -642,6 +680,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(data).containsEntry("task_status", "queued");
     }
 
+    // goto-place 自动分配准入按 robot_group 过滤：目标组无可见机器人时 fail-fast 返回 409
     @Test
     void gotoPlace_autoAssign_usesRobotGroupFilterForAdmission() {
         seedRobot("R001", "RG001", "idle");
@@ -652,6 +691,7 @@ class DefaultSchedulerFacadeTest {
                 .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(409));
     }
 
+    // dispatch_task charge 目标为机器人侧 SLAM 名（调度图不可解析）：自动分配充电位并以分配结果作为目标点提交内核
     @Test
     void dispatchTask_chargeWithSlamGoalName_autoAllocatesCharger() {
         // 生产协议兼容：任务流充电目标为机器人侧 SLAM 名（Goal_uX0Ef），调度图不可解析 → 自动分配充电位
@@ -667,6 +707,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(captor.getValue().goalWaypointId()).isEqualTo("C1");
     }
 
+    // dispatch_task charge 目标充电位写在 nav_start_point（历史命名）而 nav_end_point 为空：仍识别为目标点并提交内核
     @Test
     void dispatchTask_chargeTargetInNavStartPoint_honored() {
         // 任务流充电契约：目标充电位在 nav_start_point（历史命名），nav_end_point 为空
@@ -683,6 +724,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(captor.getValue().goalWaypointId()).isEqualTo("C1");
     }
 
+    // dispatch_task 顶层 task_template_code 而 parameters 为空：code 注入 goal params 透传给机器人侧 start-activity 查模板
     @Test
     void dispatchTask_chargeTopLevelTemplateCode_injectedIntoGoalParams() {
         // 真实任务流样例：task_template_code 为顶层字段（auto-goto-charge101），parameters 为空——
@@ -702,6 +744,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(captor.getValue().parameters().get("task_template_code")).isEqualTo("auto-goto-charge101");
     }
 
+    // dispatch_task quality_inspection 目标非作业点（P1 为 path 类型）：fail-fast 返回 400 且任务不落库
     @Test
     void dispatchTask_qualityInspection_nonWorkstationTarget_rejectedFast() {
         seedRobot("R001", "RG001", "idle");
@@ -716,6 +759,7 @@ class DefaultSchedulerFacadeTest {
         assertThat(repository.findByBusinessTaskId("task-1")).isEmpty();
     }
 
+    // dispatch_task charge 目标非充电位（W1 为作业点）：fail-fast 返回 400，detail 指出 W1 非 charge 类型
     @Test
     void dispatchTask_charge_nonChargeTarget_rejectedFast() {
         seedRobot("R001", "RG001", "idle");
@@ -729,6 +773,7 @@ class DefaultSchedulerFacadeTest {
                 });
     }
 
+    // dispatch_task 目标类型匹配：质检→作业点、充电→充电位，均正常发布 published
     @Test
     void dispatchTask_correctTargetTypes_accepted() {
         seedRobot("R001", "RG001", "idle");

@@ -73,6 +73,7 @@ class RuntimeFacadeTest {
         assertThat(row.get("battery")).isEqualTo(42.0);
     }
 
+    // runtime-snapshot 机器人心跳超时（16s 未更新）：预期标记 offline 且 dispatchable=false
     @Test
     void runtimeSnapshot_marksStaleLiveRobotOffline() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "idle", 80.0,
@@ -85,6 +86,7 @@ class RuntimeFacadeTest {
         assertThat(row.get("dispatchable")).isEqualTo(false);
     }
 
+    // runtime-snapshot 空闲在线机器人计入可用：预期 fleets 的 online/available/idle 与 planning 计数均为 1
     @Test
     void runtimeSnapshot_countsIdleLiveRobotAsAvailable() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "idle", 80.0, System.currentTimeMillis()));
@@ -102,6 +104,7 @@ class RuntimeFacadeTest {
         assertThat(planning).containsEntry("available_robot_count", 1L);
     }
 
+    // runtime-snapshot error 状态机器人：预期不可调度且 fleet 统计 error_count=1
     @Test
     void runtimeSnapshot_marksErrorRobotNotDispatchable() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "error", 80.0, System.currentTimeMillis()));
@@ -114,6 +117,7 @@ class RuntimeFacadeTest {
         assertThat(fleet).containsEntry("error_count", 1);
     }
 
+    // runtime-snapshot 按 rmf_level 过滤：预期仅返回目标楼层的机器人
     @Test
     void runtimeSnapshot_canFilterLiveRobotsByRmfLevel() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "L1", "idle", 80.0, System.currentTimeMillis()));
@@ -126,6 +130,7 @@ class RuntimeFacadeTest {
         assertThat(robots.get(0)).containsEntry("robot_code", "R002");
     }
 
+    // runtime-snapshot 按 fleet_name 过滤：预期 robots 与 fleets 列表仅保留该车队
     @Test
     void runtimeSnapshot_filtersByFleetName() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "idle", 80.0, System.currentTimeMillis()));
@@ -139,6 +144,7 @@ class RuntimeFacadeTest {
                 .containsEntry("fleet_name", "fleet_B");
     }
 
+    // runtime-snapshot 存在运行中任务：预期挂到机器人行（rmf_task_id/task_status）并计入 fleet 与顶层任务列表
     @Test
     void runtimeSnapshot_runningTaskAttachesToRobotRowAndFleetCounters() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "running", 80.0, System.currentTimeMillis()));
@@ -159,6 +165,7 @@ class RuntimeFacadeTest {
         assertThat(tasks.get(0)).containsEntry("robot_code", "R001");
     }
 
+    // runtime-snapshot 终态任务默认排除（task_total=0）：预期 task_list_limit 超上限时收敛为 1000
     @Test
     void runtimeSnapshot_excludesTerminalTasksAndClampsTaskLimit() {
         taskStateMirror.upsert(new TaskStateEvent("qi.completed-001", "completed", "quality_inspection",
@@ -173,6 +180,7 @@ class RuntimeFacadeTest {
         assertThat(clamped).containsEntry("task_list_limit", 1000);
     }
 
+    // runtime-snapshot 充电桩汇总：预期返回 total/available/items/last_error 完整结构（无桩时计数为 0）
     @Test
     void runtimeSnapshot_chargerSummaryCounts() {
         Map<String, Object> data = facade.runtimeSnapshot(null, null, null, 200);
@@ -184,6 +192,7 @@ class RuntimeFacadeTest {
         assertThat(chargers).containsKey("last_error");
     }
 
+    // runtime-snapshot 组件健康段：预期 components 非空且每项含 component/status 字段
     @Test
     void runtimeSnapshot_containsComponentsSection() {
         Map<String, Object> data = facade.runtimeSnapshot(null, null, null, 200);
@@ -205,6 +214,7 @@ class RuntimeFacadeTest {
         assertThat((List<?>) data.get("reasons")).isEmpty();
     }
 
+    // pre-switch-check 车队机器人全空闲（idle/charging）且无任务：预期 check_result=ready、allowed=true
     @Test
     void preSwitchCheck_idleRobotsNoTasks_returnsReady() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "idle", 80.0, System.currentTimeMillis()));
@@ -221,6 +231,7 @@ class RuntimeFacadeTest {
         assertThat(data).containsKey("checked_at");
     }
 
+    // pre-switch-check 存在运行中机器人：预期 allowed=false、check_result=robots_running 且 busy_robots 列出该机器人
     @Test
     void preSwitchCheck_runningRobotBlocks() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "running", 80.0, System.currentTimeMillis()));
@@ -233,6 +244,7 @@ class RuntimeFacadeTest {
         assertThat((List<?>) robots.get("busy_robots")).hasSize(1);
     }
 
+    // pre-switch-check 机器人空闲但有排队任务：预期 allowed=false、check_result=tasks_pending 且 pending_tasks 非空
     @Test
     void preSwitchCheck_pendingTaskBlocksWithoutBusyRobots() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "idle", 80.0, System.currentTimeMillis()));
@@ -248,6 +260,7 @@ class RuntimeFacadeTest {
         assertThat((List<?>) tasks.get("pending_tasks")).hasSize(1);
     }
 
+    // pre-switch-check paused 状态机器人不算忙碌：预期 allowed=true、check_result=ready
     @Test
     void preSwitchCheck_pausedRobotDoesNotBlock() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "paused", 80.0, System.currentTimeMillis()));
@@ -258,6 +271,7 @@ class RuntimeFacadeTest {
         assertThat(data).containsEntry("check_result", "ready");
     }
 
+    // pre-switch-check 已完成任务不计入 pending：预期不阻塞切换，allowed=true
     @Test
     void preSwitchCheck_completedTasksDoNotBlock() {
         fleetStateMirror.upsert(robot("R001", "fleet_A", "idle", 80.0, System.currentTimeMillis()));

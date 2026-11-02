@@ -10,144 +10,160 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
-/**
- * 地图管理器：持有当前激活地图（元数据 + 导航图），支持热切换。
- *
- * <p>加载优先级：存档激活版本 → 配置文件兜底（本地调试）。
- * 地图元数据一个 json 全量描述（SLAM 坐标系），替换旧栈 scene bundle 多配置文件体系。</p>
- */
+/** 地图生命周期与任务绑定入口；任务接纳和激活在同一监视器内串行决策。 */
 @Slf4j
 @Component
 public class MapManager {
-
     public static final String STATUS_PUBLISHED = "published";
-
     private final MapMetadataParser parser;
     private final MapArchiveRepository archiveRepository;
-
-    private volatile MapMetadata activeMetadata;
-    private volatile NavigationGraph activeGraph;
-    private volatile Instant loadedAt;
-
-    /** 地图激活后回调（热切换时清理交通占用等运行态，由装配层注入）。 */
-    private volatile Runnable onActivated;
-
-    public void setOnActivated(Runnable onActivated) {
-        this.onActivated = onActivated;
-    }
+    private volatile MapSnapshot activeSnapshot;
+    private int activeBindings;
+    private long generation;
+    private Runnable onActivated;
+    private BooleanSupplier activationBlocked = () -> false;
 
     public MapManager(MapMetadataParser parser, MapArchiveRepository archiveRepository) {
         this.parser = parser;
         this.archiveRepository = archiveRepository;
     }
 
-    /**
-     * 启动加载：优先存档激活版本；无存档时返回 false 由调用方走配置文件兜底。
-     */
+    /** 门禁通过后、快照提交前清理旧运行态；清理失败时中止发布。 */
+    public synchronized void setOnActivated(Runnable onActivated) {
+        this.onActivated = onActivated;
+    }
+
+    /** 由装配层补充交通占用检查；驻留占用也必须先解除，才允许切换地图。 */
+    public synchronized void setActivationBlocked(BooleanSupplier activationBlocked) {
+        this.activationBlocked = java.util.Objects.requireNonNull(activationBlocked);
+    }
+
+    /** 接纳任务时立即绑定，包含排队和自动分配等待阶段。无地图时也阻止中途加载地图。 */
+    public synchronized MapBinding bindTask() {
+        activeBindings++;
+        return new MapBinding(this, activeSnapshot);
+    }
+
+    public Optional<MapSnapshot> activeSnapshot() {
+        return Optional.ofNullable(activeSnapshot);
+    }
+
+    public Optional<MapMetadata> activeMetadata() {
+        return activeSnapshot().map(MapSnapshot::metadata);
+    }
+
+    public Optional<NavigationGraph> activeGraph() {
+        return activeSnapshot().map(MapSnapshot::graph);
+    }
+
+    public Instant loadedAt() {
+        return activeSnapshot().map(MapSnapshot::loadedAt).orElse(null);
+    }
+
+    public boolean isLoaded() {
+        return activeSnapshot != null;
+    }
+
+    public Optional<String> activeFloorId() {
+        return activeSnapshot().map(MapSnapshot::defaultFloorId);
+    }
+
     public boolean loadFromArchive() {
         return archiveRepository.findActive().map(archive -> {
             try {
-                activateInternal(parser.parse(archive.getMetadataJson()), archive);
+                activate(parser.parse(archive.getMetadataJson()), archive, false);
                 return true;
             } catch (MapMetadataException e) {
-                log.error("存档地图解析失败，跳过激活: map={} version={} error={}",
+                log.error("存档地图解析失败: map={} version={} error={}",
                         archive.getMapName(), archive.getVersion(), e.getMessage());
                 return false;
             }
         }).orElse(false);
     }
 
-    /**
-     * 本地调试兜底：从文件加载（不写存档）。
-     */
     public void loadFromFiles(String metadataJsonPath, String pgmPath, String yamlPath) {
+        String json;
         try {
-            String json = Files.readString(Path.of(metadataJsonPath), StandardCharsets.UTF_8);
-            MapMetadata metadata = parser.parse(json);
-            MapArchive archive = new MapArchive();
-            archive.setMapName(metadata.getMapName());
-            archive.setVersion(metadata.getVersionInfo().getVersion());
-            archive.setStatus(metadata.getVersionInfo().getStatus());
-            archive.setMetadataJson(json);
-            archive.setPgmPath(pgmPath);
-            archive.setYamlPath(yamlPath);
-            activateInternal(metadata, archive);
-        } catch (MapMetadataException e) {
-            throw e;
-        } catch (Exception e) {
+            json = Files.readString(Path.of(metadataJsonPath), StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
             throw new MapMetadataException("地图文件加载失败: " + e.getMessage(), e);
         }
+        MapMetadata metadata = parser.parse(json);
+        activate(metadata, archive(metadata, json, pgmPath, yamlPath), false);
     }
 
-    /**
-     * 上传激活：解析校验（必须 published）→ 切换运行图 → 写存档。
-     */
-    public MapMetadata activateFromJson(String metadataJson, String pgmPath, String yamlPath) {
-        MapMetadata metadata = parser.parse(metadataJson);
-        if (!STATUS_PUBLISHED.equals(metadata.getVersionInfo().getStatus())) {
-            throw new MapMetadataException("只有 published 状态的地图版本才能激活，当前状态: "
-                    + metadata.getVersionInfo().getStatus());
-        }
+    /** 上传仅 published 版本；拒绝时不更新地图存档，也不清理运行态。 */
+    public MapMetadata activateFromJson(String json, String pgmPath, String yamlPath) {
+        MapMetadata metadata = parser.parse(json);
+        activate(metadata, archive(metadata, json, pgmPath, yamlPath), true);
+        return metadata;
+    }
+
+    private MapArchive archive(MapMetadata metadata, String json, String pgmPath, String yamlPath) {
         MapArchive archive = new MapArchive();
         archive.setMapName(metadata.getMapName());
         archive.setVersion(metadata.getVersionInfo().getVersion());
         archive.setStatus(metadata.getVersionInfo().getStatus());
-        archive.setMetadataJson(metadataJson);
+        archive.setMetadataJson(json);
         archive.setPgmPath(pgmPath);
         archive.setYamlPath(yamlPath);
-        archiveRepository.findByMapNameAndVersion(metadata.getMapName(), metadata.getVersionInfo().getVersion())
-                .ifPresentOrElse(existing -> {
-                    archive.setId(existing.getId());
-                    archive.setActivatedAt(existing.getActivatedAt());
-                    archiveRepository.update(archive);
-                }, () -> archiveRepository.save(archive));
-        activateInternal(metadata, archive);
-        log.info("地图已激活并存档: map={} version={}", metadata.getMapName(),
-                metadata.getVersionInfo().getVersion());
-        return metadata;
+        return archive;
     }
 
-    /** 当前激活元数据（未加载为空）。 */
-    public Optional<MapMetadata> activeMetadata() {
-        return Optional.ofNullable(activeMetadata);
-    }
-
-    /** 当前运行图（未加载为空）。 */
-    public Optional<NavigationGraph> activeGraph() {
-        return Optional.ofNullable(activeGraph);
-    }
-
-    public Instant loadedAt() {
-        return loadedAt;
-    }
-
-    public boolean isLoaded() {
-        return activeMetadata != null;
-    }
-
-    /** 默认楼层：第一层（本期单层调度；跨层调度 P4+ 使用）。 */
-    public Optional<String> activeFloorId() {
-        return activeMetadata().map(metadata -> metadata.getFloors().get(0).getFloorId());
-    }
-
-    private void activateInternal(MapMetadata metadata, MapArchive archive) {
-        this.activeMetadata = metadata;
-        this.activeGraph = NavigationGraph.from(metadata);
-        this.loadedAt = Instant.now();
-        List<String> waypointCount = metadata.getFloors().stream()
-                .map(floor -> floor.getFloorId() + ":" + floor.getWaypoints().size())
-                .toList();
-        log.info("导航图已构建: map={} floors={} waypoints={} paths={}",
-                metadata.getMapName(), metadata.getFloors().size(), waypointCount,
-                metadata.getFloors().stream().mapToInt(f -> f.getPaths().size()).sum());
+    private synchronized void activate(MapMetadata metadata, MapArchive archive, boolean persist) {
+        if (!STATUS_PUBLISHED.equals(metadata.getVersionInfo().getStatus())) {
+            throw new MapMetadataException("只有 published 状态的地图版本才能激活");
+        }
+        if (activeBindings > 0) {
+            throw new MapActivationConflictException("地图仍有 " + activeBindings + " 个使用绑定，请等待任务退出后再切换");
+        }
+        if (activationBlocked.getAsBoolean()) {
+            throw new MapActivationConflictException("仍有交通占用（含机器人驻留），请确认机器人停止并解除占用后再切换");
+        }
+        // 构图失败时旧快照、存档均不变；门禁通过后才执行清理与存档。
+        NavigationGraph graph = NavigationGraph.from(metadata);
         if (onActivated != null) {
-            try {
-                onActivated.run();
-            } catch (Exception e) {
-                log.warn("地图激活回调执行失败: {}", e.getMessage());
+            onActivated.run();
+        }
+        if (persist) {
+            archiveRepository.findByMapNameAndVersion(archive.getMapName(), archive.getVersion())
+                    .ifPresentOrElse(existing -> {
+                        archive.setId(existing.getId());
+                        archive.setActivatedAt(existing.getActivatedAt());
+                        archiveRepository.update(archive);
+                    }, () -> archiveRepository.save(archive));
+        }
+        activeSnapshot = new MapSnapshot(metadata.getMapName(), metadata.getVersionInfo().getVersion(),
+                ++generation, metadata, graph, Instant.now(), archive.getPgmPath(), archive.getYamlPath());
+        log.info("地图已激活: map={} version={} generation={}",
+                activeSnapshot.mapName(), activeSnapshot.version(), activeSnapshot.generation());
+    }
+
+    /** 绑定关闭幂等，可由排队取消和执行线程退出分别调用。 */
+    public static final class MapBinding implements AutoCloseable {
+        private final MapManager owner;
+        private final MapSnapshot snapshot;
+        private boolean closed;
+
+        private MapBinding(MapManager owner, MapSnapshot snapshot) {
+            this.owner = owner;
+            this.snapshot = snapshot;
+        }
+
+        public Optional<MapSnapshot> snapshot() {
+            return Optional.ofNullable(snapshot);
+        }
+
+        @Override
+        public void close() {
+            synchronized (owner) {
+                if (!closed) {
+                    closed = true;
+                    owner.activeBindings--;
+                }
             }
         }
     }

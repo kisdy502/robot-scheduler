@@ -35,6 +35,7 @@ class RobotEventMonitorTest {
         monitor.batteryAggregationWindowMillis = 30_000;
     }
 
+    // mode 变化（idle→running）：独立记录一条 MODE 事件，含新旧值
     @Test
     void modeChange_recordsIndependentEvent() {
         monitor.onFrame("R001", true, "idle", 80.0, true, "running", 80.0);
@@ -48,6 +49,7 @@ class RobotEventMonitorTest {
         assertThat(captor.getValue().getEventCount()).isEqualTo(1);
     }
 
+    // 机器人下线：记录 WARN 级 OFFLINE 事件，消息携带末次电量百分比
     @Test
     void offline_recordsWarnEvent() {
         monitor.onFrame("R001", true, "running", 15.0, false, "unknown", 15.0);
@@ -62,6 +64,7 @@ class RobotEventMonitorTest {
         assertThat(offline.getMessage()).contains("15%");
     }
 
+    // 电量变化在聚合窗口内：不插新行，更新最新聚合行（计数+1、新值刷新）
     @Test
     void batteryDeltaWithinWindow_aggregatesIntoLatestRow() {
         RobotEventRecord latest = event(7L, "R001", "BATTERY_DELTA", 20_000);
@@ -78,6 +81,7 @@ class RobotEventMonitorTest {
         assertThat(captor.getValue().getNewValue()).isEqualTo("79%");
     }
 
+    // 电量变化超出聚合窗口：插入新事件行而非聚合旧行
     @Test
     void batteryDeltaOutsideWindow_insertsNewRow() {
         when(repository.findLatest(anyString(), anyString(), anyString()))
@@ -89,6 +93,7 @@ class RobotEventMonitorTest {
         verify(repository, never()).updateAggregated(any());
     }
 
+    // 电量跌破低电量阈值（20%）：独立记录 WARN 行，不并入聚合
     @Test
     void lowBatteryThresholdCrossing_recordsIndependentWarnRow() {
         monitor.onFrame("R001", true, "idle", 20.5, true, "idle", 19.8);
@@ -99,6 +104,7 @@ class RobotEventMonitorTest {
         assertThat(captor.getValue().getSeverity()).isEqualTo("WARN");
     }
 
+    // 电量跌破严重阈值（10%）：记录 ERROR 级独立事件行
     @Test
     void criticalBatteryThreshold_recordsErrorSeverity() {
         monitor.onFrame("R001", true, "idle", 10.5, true, "idle", 9.9);
@@ -109,6 +115,7 @@ class RobotEventMonitorTest {
         assertThat(captor.getValue().getSeverity()).isEqualTo("ERROR");
     }
 
+    // 状态与电量均无明显变化：不插入也不更新任何事件
     @Test
     void unchangedState_recordsNothing() {
         monitor.onFrame("R001", true, "idle", 80.2, true, "idle", 80.4);
@@ -117,6 +124,7 @@ class RobotEventMonitorTest {
         verify(repository, never()).updateAggregated(any());
     }
 
+    // 在图/离图仅在翻转时记录：离图 WARN 带坐标原因、回图 INFO，持续状态不重复
     @Test
     void graphStateTransitions_recordedOnlyOnFlip() {
         // 首帧在图=初始态不记录；离图 WARN（带原因坐标）；持续离图不重复；回图 INFO
@@ -137,6 +145,7 @@ class RobotEventMonitorTest {
         assertThat(onGraph.getSeverity()).isEqualTo("INFO");
     }
 
+    // 地图标识不一致：ERROR 记录两侧地图名，恢复记 INFO，首帧一致/标识缺失不记录
     @Test
     void mapIdentityMismatch_recordsErrorAndRecovery() {
         // 不一致 ERROR（带两侧地图名）；恢复 INFO；未上报/持续一致不记录
@@ -157,6 +166,7 @@ class RobotEventMonitorTest {
         assertThat(recovered.getReason()).isEqualTo("MAP_MATCHED");
     }
 
+    // 事件仓储异常：异常被吞不向车队主链路传播
     @Test
     void repositoryFailure_doesNotPropagate() {
         when(repository.findLatest(anyString(), anyString(), anyString()))

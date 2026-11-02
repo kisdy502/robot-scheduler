@@ -41,7 +41,8 @@ public class MapController {
     private final MapManager mapManager;
     private final com.zioneer.robotscheduler.api.config.MapStorageProperties storageProperties;
 
-    @Operation(summary = "上传并激活地图（multipart: metadata.json 必填，map.png / map.yaml 可选附件）")
+    @Operation(summary = "上传并激活地图（multipart: metadata.json 必填，map.png / map.yaml 可选附件）",
+            description = "仅 published 版本可激活；有任务绑定或交通占用（含驻留）时返回 HTTP 409 + Result 失败信封")
     @PostMapping("/upload")
     public Result<Map<String, Object>> upload(
             @RequestPart("metadata") MultipartFile metadataFile,
@@ -67,8 +68,9 @@ public class MapController {
             data.put("loaded", false);
             return Result.ok(data);
         }
-        MapMetadata metadata = mapManager.activeMetadata().orElseThrow();
-        NavigationGraph graph = mapManager.activeGraph().orElseThrow();
+        var snapshot = mapManager.activeSnapshot().orElseThrow();
+        MapMetadata metadata = snapshot.metadata();
+        NavigationGraph graph = snapshot.graph();
         data.put("loaded", true);
         data.put("map_name", metadata.getMapName());
         data.put("version", metadata.getVersionInfo().getVersion());
@@ -81,8 +83,8 @@ public class MapController {
                 "paths", floor.getPaths().size(),
                 "zones", floor.getZoneConstraints().size())).toList());
         data.put("inter_floor_connections", metadata.getInterFloorConnections().size());
-        data.put("active_floor_id", mapManager.activeFloorId().orElse(null));
-        data.put("loaded_at", mapManager.loadedAt() == null ? null : mapManager.loadedAt().toEpochMilli());
+        data.put("active_floor_id", snapshot.defaultFloorId());
+        data.put("loaded_at", snapshot.loadedAt().toEpochMilli());
         data.put("graph_edges", graph.floorIds().size());
         return Result.ok(data);
     }
@@ -211,18 +213,8 @@ public class MapController {
     }
 
     private String getPgmPathFromStorage() {
-        // 1. 数据库存档路径
-        try {
-            var field = mapManager.getClass().getDeclaredField("archiveRepository");
-            field.setAccessible(true);
-            var repo = field.get(mapManager);
-            if (repo instanceof com.zioneer.robotscheduler.core.repository.MapArchiveRepository archiveRepo) {
-                String path = archiveRepo.findActive().map(a -> a.getPgmPath()).orElse(null);
-                if (path != null && !path.isBlank()) return path;
-            }
-        } catch (Exception e) {
-            log.warn("反射获取存档失败: {}", e.getMessage());
-        }
+        String activePath = mapManager.activeSnapshot().map(snapshot -> snapshot.pgmPath()).orElse(null);
+        if (activePath != null && !activePath.isBlank()) return activePath;
         // 2. 回退：本地配置目录找 .pgm / .png
         try {
             String metadataPath = storageProperties.getMetadataPath();
@@ -255,16 +247,8 @@ public class MapController {
     }
 
     private String getYamlPathFromStorage() {
-        // 1. 数据库存档
-        try {
-            var field = mapManager.getClass().getDeclaredField("archiveRepository");
-            field.setAccessible(true);
-            var repo = field.get(mapManager);
-            if (repo instanceof com.zioneer.robotscheduler.core.repository.MapArchiveRepository archiveRepo) {
-                String path = archiveRepo.findActive().map(a -> a.getYamlPath()).orElse(null);
-                if (path != null && !path.isBlank()) return path;
-            }
-        } catch (Exception e) { /* */ }
+        String activePath = mapManager.activeSnapshot().map(snapshot -> snapshot.yamlPath()).orElse(null);
+        if (activePath != null && !activePath.isBlank()) return activePath;
         // 2. 本地目录找 .yaml
         try {
             String metadataPath = storageProperties.getMetadataPath();
@@ -360,7 +344,7 @@ public class MapController {
         }
         NavigationGraph graph = mapManager.activeGraph().orElseThrow();
         String targetFloor = floorId != null && !floorId.isBlank() ? floorId
-                : mapManager.activeFloorId().orElse(null);
+                : graph.source().getFloors().get(0).getFloorId();
         List<com.zioneer.robotscheduler.core.map.WaypointMetadata> waypoints = type == null || type.isBlank()
                 ? allWaypoints(graph, targetFloor)
                 : graph.waypointsByType(targetFloor, WaypointType.fromWireName(type));
@@ -379,7 +363,7 @@ public class MapController {
 
     private List<com.zioneer.robotscheduler.core.map.WaypointMetadata> allWaypoints(NavigationGraph graph,
                                                                                     String floorId) {
-        return mapManager.activeMetadata().orElseThrow().getFloors().stream()
+        return graph.source().getFloors().stream()
                 .filter(floor -> floorId == null || floor.getFloorId().equals(floorId))
                 .flatMap(floor -> floor.getWaypoints().stream())
                 .toList();

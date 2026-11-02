@@ -27,6 +27,9 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
     /** 静止机器人驻留段：robotCode → 吸附 segment id（机器人停在路段中间的障碍化）。 */
     private final Map<String, String> dwellSegmentByRobot = new ConcurrentHashMap<>();
 
+    /** 停止确认标记：false=停止请求尚未送达，true=已接受、仍待位置帧确认。 */
+    private final Map<String, Boolean> stopHolds = new ConcurrentHashMap<>();
+
     /** 审计出口（可选，装配层注入）。 */
     private volatile TrafficEventSink eventSink = TrafficEventSink.NOOP;
 
@@ -49,6 +52,7 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
     @Override
     public synchronized boolean tryAcquire(String robotCode, List<String> segmentIds,
                                            Set<String> waypointIds, Duration lease) {
+        if (isAwaitingStop(robotCode)) return false;
         for (String segment : segmentIds) {
             if (isOwnedByOther(segmentOwner.get(segment), robotCode)) {
                 return false;
@@ -91,6 +95,7 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
 
     @Override
     public synchronized void releaseBehind(String robotCode, String reachedWaypointId) {
+        if (isAwaitingStop(robotCode)) return;
         OccupiedResources resources = occupationByRobot.get(robotCode);
         if (resources == null) {
             return;
@@ -103,6 +108,7 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
 
     @Override
     public synchronized void releaseSegments(String robotCode, List<String> segmentIds) {
+        if (isAwaitingStop(robotCode)) return;
         OccupiedResources resources = occupationByRobot.get(robotCode);
         if (resources == null || segmentIds == null || segmentIds.isEmpty()) {
             return;
@@ -117,6 +123,54 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
 
     @Override
     public synchronized void releaseAll(String robotCode) {
+        if (isAwaitingStop(robotCode)) return;
+        doReleaseAll(robotCode);
+    }
+
+    @Override
+    public synchronized void releaseAllAndDwell(String robotCode, String dwellWaypointId) {
+        if (isAwaitingStop(robotCode)) return;
+        doReleaseAll(robotCode);
+        if (dwellWaypointId == null || dwellWaypointId.isBlank()) {
+            return;
+        }
+        putDwellWaypoint(robotCode, dwellWaypointId);
+    }
+
+    @Override
+    public synchronized boolean retainUntilStopped(String robotCode, String reason) {
+        if (stopHolds.putIfAbsent(robotCode, false) != null) return false;
+        audit(robotCode, "HOLD_UNTIL_STOPPED", List.of(), reason);
+        return true;
+    }
+
+    @Override
+    public boolean isAwaitingStop(String robotCode) {
+        return robotCode != null && stopHolds.containsKey(robotCode);
+    }
+
+    @Override
+    public synchronized void markStopAccepted(String robotCode) {
+        stopHolds.computeIfPresent(robotCode, (robot, accepted) -> true);
+    }
+
+    @Override
+    public boolean isStopAccepted(String robotCode) {
+        return Boolean.TRUE.equals(stopHolds.get(robotCode));
+    }
+
+    @Override
+    public synchronized boolean confirmStopped(String robotCode, String waypointId, String segmentId) {
+        if (!isStopAccepted(robotCode) || (waypointId == null && segmentId == null)) return false;
+        stopHolds.remove(robotCode);
+        // 同一把锁内先接续物理驻留，再释放未来预约，其他机器人不会拿到空档。
+        updateDwell(robotCode, waypointId, segmentId);
+        doReleaseAll(robotCode);
+        audit(robotCode, "STOP_CONFIRMED", List.of());
+        return true;
+    }
+
+    private void doReleaseAll(String robotCode) {
         OccupiedResources resources = occupationByRobot.remove(robotCode);
         if (resources == null) {
             return;
@@ -129,6 +183,18 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
         if (!resources.waypointIds().isEmpty()) {
             audit(robotCode, "RELEASE_WAYPOINT", resources.waypointIds().stream().toList());
         }
+    }
+
+    /** 驻留登记（含同点冲突防御审计：多车同点 = 叠车已成事实，大声告警不静默）。 */
+    private void putDwellWaypoint(String robotCode, String waypointId) {
+        String existingOwner = dwellOwner(waypointId);
+        if (existingOwner != null && !existingOwner.equals(robotCode)) {
+            // 防御：不拒绝登记（拒绝会让第二台车对交通系统隐形 = 欠阻断更危险），
+            // 保留双方占用（过阻断方向安全）+ 冲突审计暴露，等让位机制处理
+            audit(robotCode, "DWELL_CONFLICT", List.of(waypointId),
+                    "conflict with " + existingOwner + "（多车同点驻留，物理重叠）");
+        }
+        dwellWaypointByRobot.put(robotCode, waypointId);
     }
 
     @Override
@@ -179,6 +245,7 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
 
     @Override
     public synchronized void updateDwell(String robotCode, String waypointId, String segmentId) {
+        if (isAwaitingStop(robotCode)) return;
         String oldWaypoint = dwellWaypointByRobot.get(robotCode);
         String oldSegment = dwellSegmentByRobot.get(robotCode);
         String newWaypoint = waypointId == null || waypointId.isBlank() ? null : waypointId;
@@ -188,6 +255,7 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
                 audit(robotCode, "RELEASE_WAYPOINT", List.of(oldWaypoint), "dwell");
             }
             if (newWaypoint != null) {
+                putDwellWaypoint(robotCode, newWaypoint);
                 audit(robotCode, "ACQUIRE_WAYPOINT", List.of(newWaypoint), "dwell");
             }
         }
@@ -232,7 +300,7 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
     }
 
     @Override
-    public Map<String, OccupiedResources> occupationSnapshot() {
+    public synchronized Map<String, OccupiedResources> occupationSnapshot() {
         Map<String, OccupiedResources> snapshot = new HashMap<>();
         // 任务占用（可变集合重建：后续驻留 merge 需要写入，Set.copyOf 不可变会抛 UnsupportedOperationException）
         occupationByRobot.forEach((robot, res) -> snapshot.put(robot,
@@ -253,6 +321,9 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
                     oldRes.segmentIds().addAll(add.segmentIds());
                     return oldRes;
                 }));
+        // 即使没有路线预约，停止确认也必须对切图门禁可见。
+        stopHolds.keySet().forEach(robot -> snapshot.putIfAbsent(robot,
+                new OccupiedResources(new HashSet<>(), new HashSet<>(), System.currentTimeMillis())));
         return Collections.unmodifiableMap(snapshot);
     }
 
