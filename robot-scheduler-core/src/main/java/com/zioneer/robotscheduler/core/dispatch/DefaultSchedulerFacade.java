@@ -1,5 +1,6 @@
 package com.zioneer.robotscheduler.core.dispatch;
 
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
 import com.zioneer.robotscheduler.common.scheduler.SchedulerConstants;
 import com.zioneer.robotscheduler.common.scheduler.task.DispatchStatus;
 import com.zioneer.robotscheduler.common.scheduler.task.TaskCategories;
@@ -52,6 +53,45 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
     private final SchedulerEventBus eventBus;
     private final MapManager mapManager;
     private final TaskExecutionEngine executionEngine;
+    private final RobotAvailabilityService availability;
+
+    @Override
+    public Map<String, Object> startExternalOperation(String owner, String robot, String operation) {
+        try (var binding = mapManager.bindTask()) {
+            availability.assertExternalStartAllowed(robot);
+            return operationData(assignmentRegistry.startOperation(owner, robot, operation));
+        }
+    }
+
+    @Override
+    public Map<String, Object> finishExternalOperation(String owner, String robot, String operation) {
+        return operationData(assignmentRegistry.finishOperation(owner, robot, operation));
+    }
+
+    @Override
+    public Map<String, Object> robotUse(String robot) {
+        if (robot == null || robot.isBlank()) throw SchedulerHttpException.badRequest("robot_code is required");
+        synchronized (assignmentRegistry) {
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("robot_code", robot);
+            data.put("taskflow_id", assignmentRegistry.ownerOf(robot));
+            var operation = assignmentRegistry.activeOperation(robot);
+            data.put("external_operation", operation == null ? null : operationData(operation));
+            data.put("available_for_new_taskflow", assignmentRegistry.canAllocate(robot, null));
+            return data;
+        }
+    }
+
+    private Map<String, Object> operationData(TaskAssignmentRegistry.OperationUse operation) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("robot_code", operation.robotCode());
+        data.put("taskflow_id", operation.taskflowId());
+        data.put("operation_id", operation.operationId());
+        data.put("state", operation.state());
+        data.put("started_at", operation.startedAt());
+        data.put("finished_at", operation.finishedAt());
+        return data;
+    }
 
     /**
      * 内核任务状态回执入口：首次收到某调度请求的事件时回填记录的 rmf_task_id 与受理状态
@@ -771,68 +811,98 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
                                                      String navStartPoint, String navEndPoint,
                                                      Map<String, Object> parameters,
                                                      String robotGroup, String fleetName) {
-        // 自动分配准入检查（fail-fast）：车队组一台机器人都没注册属配置问题，秒级不会自愈，
-        // 直接拒绝并提示检查 RMS，避免 60s 排队傻等；有机器人但忙碌/离线不拦截（走排队语义）
-        if (robotCode == null || robotCode.isBlank()) {
-            requireFleetRobots(fleetName, robotGroup);
-        }
-        long now = System.currentTimeMillis();
-        TaskRecord record = new TaskRecord();
-        record.setSchedulerRequestId(UUID.randomUUID().toString());
-        record.setBusinessTaskId(taskId);
-        record.setCategory(category);
-        record.setRobotCode(robotCode);
-        record.setDispatchStatus(DispatchStatus.PUBLISHED);
-        record.setMessage("任务已受理，正在等待调度方确认");
-        // 原始请求报文镜像（对外契约字段名，任务列表"请求报文"列直接展示）
-        Map<String, Object> requestPayload = new java.util.LinkedHashMap<>();
-        requestPayload.put("task_id", taskId);
-        if (taskflowId != null && !taskflowId.isBlank()) {
-            requestPayload.put("taskflow_id", taskflowId);
-        }
-        if (taskTemplateCode != null && !taskTemplateCode.isBlank()) {
-            requestPayload.put("task_template_code", taskTemplateCode);
-        }
-        requestPayload.put("task_template_type", category);
-        if (navStartPoint != null && !navStartPoint.isBlank()) {
-            requestPayload.put("nav_start_point", navStartPoint);
-        }
-        if (navEndPoint != null && !navEndPoint.isBlank()) {
-            requestPayload.put("nav_end_point", navEndPoint);
-        }
-        if (robotCode != null && !robotCode.isBlank()) {
-            requestPayload.put("robot_code", robotCode);
-        }
-        if (robotGroup != null && !robotGroup.isBlank()) {
-            requestPayload.put("robot_group", robotGroup);
-        }
-        if (fleetName != null && !fleetName.isBlank()) {
-            requestPayload.put("fleet_name", fleetName);
-        }
-        if (parameters != null && !parameters.isEmpty()) {
-            requestPayload.put("parameters", parameters);
-        }
-        record.setPayload(requestPayload);
-        record.setCreatedAtMillis(now);
-        record.setUpdatedAtMillis(now);
-        taskRecordRepository.save(record);
-        // 提交内核执行：指定机器人直接执行；无 robot_code 走自动分配（等待可用机器人）
-        if (robotCode != null && !robotCode.isBlank()) {
+        synchronized (assignmentRegistry) {
+            // 自动分配准入检查（fail-fast）：车队组一台机器人都没注册属配置问题，秒级不会自愈，
+            // 直接拒绝并提示检查 RMS，避免 60s 排队傻等；有机器人但忙碌/离线不拦截（走排队语义）
+            if (robotCode == null || robotCode.isBlank()) {
+                requireFleetRobots(fleetName, robotGroup);
+            }
+            long now = System.currentTimeMillis();
+            TaskRecord record = new TaskRecord();
+            record.setSchedulerRequestId(UUID.randomUUID().toString());
+            record.setBusinessTaskId(taskId);
+            record.setCategory(category);
+            record.setRobotCode(robotCode);
+            record.setDispatchStatus(DispatchStatus.PUBLISHED);
+            record.setMessage("任务已受理，正在等待调度方确认");
+            // 原始请求报文镜像（对外契约字段名，任务列表"请求报文"列直接展示）
+            Map<String, Object> requestPayload = new java.util.LinkedHashMap<>();
+            requestPayload.put("task_id", taskId);
+            if (taskflowId != null && !taskflowId.isBlank()) {
+                requestPayload.put("taskflow_id", taskflowId);
+            }
+            if (taskTemplateCode != null && !taskTemplateCode.isBlank()) {
+                requestPayload.put("task_template_code", taskTemplateCode);
+            }
+            requestPayload.put("task_template_type", category);
+            if (navStartPoint != null && !navStartPoint.isBlank()) {
+                requestPayload.put("nav_start_point", navStartPoint);
+            }
+            if (navEndPoint != null && !navEndPoint.isBlank()) {
+                requestPayload.put("nav_end_point", navEndPoint);
+            }
+            if (robotCode != null && !robotCode.isBlank()) {
+                requestPayload.put("robot_code", robotCode);
+            }
+            if (robotGroup != null && !robotGroup.isBlank()) {
+                requestPayload.put("robot_group", robotGroup);
+            }
+            if (fleetName != null && !fleetName.isBlank()) {
+                requestPayload.put("fleet_name", fleetName);
+            }
+            if (parameters != null && !parameters.isEmpty()) {
+                requestPayload.put("parameters", parameters);
+            }
+            // 旧接口允许重复业务任务 ID；新流程显式启用后，才以该 ID 收敛网络重试。
+            boolean idempotent = parameters != null && Boolean.TRUE.equals(parameters.get("idempotent"));
+            Optional<TaskRecord> previous = idempotent
+                    ? taskRecordRepository.findByBusinessTaskId(taskId) : Optional.empty();
+            if (previous.isPresent()) {
+                TaskRecord existing = previous.get();
+                if (!Objects.equals(existing.getPayload(), requestPayload)) {
+                    throw SchedulerHttpException.conflict("task_id already exists with a different request");
+                }
+                Map<String, Object> replay = buildDispatchData(existing);
+                Map<String, Object> status = buildStatusResponse(existing);
+                for (String key : List.of("task_status", "dispatch_status", "rmf_response_received",
+                        "task_state_received", "execution_final", "message")) {
+                    if (status.containsKey(key)) replay.put(key, status.get(key));
+                }
+                return replay;
+            }
+            if (robotCode != null && !robotCode.isBlank()) {
+                assignmentRegistry.assertCanUse(robotCode, taskflowId);
+            }
             TaskGoal goal = buildGoal(category, taskId, taskTemplateCode, navStartPoint, navEndPoint, taskflowId,
                     parameters, robotCode);
-            executionEngine.submit(record, robotCode, goal);
-        } else {
-            TaskGoal goal = buildGoal(category, taskId, taskTemplateCode, navStartPoint, navEndPoint, taskflowId,
-                    parameters, null);
-            executionEngine.submitForAutoAssign(record, goal, fleetName, robotGroup);
+            record.setPayload(requestPayload);
+            record.setCreatedAtMillis(now);
+            record.setUpdatedAtMillis(now);
+            taskRecordRepository.save(record);
+            // 提交内核执行：指定机器人直接执行；无 robot_code 走自动分配（等待可用机器人）
+            try {
+                if (robotCode != null && !robotCode.isBlank()) {
+                    executionEngine.submit(record, robotCode, goal);
+                } else {
+                    executionEngine.submitForAutoAssign(record, goal, fleetName, robotGroup);
+                }
+            } catch (RuntimeException failure) {
+                // 落库后受理失败不能留下永久 published；保留失败记录供相同请求重试查询。
+                record.setAbandoned(true);
+                record.setArchivedAtMillis(System.currentTimeMillis());
+                record.setUpdatedAtMillis(System.currentTimeMillis());
+                record.setMessage("内核受理失败: " + failure.getMessage());
+                taskRecordRepository.update(record);
+                throw failure;
+            }
+            return buildDispatchData(record);
         }
-        return buildDispatchData(record);
     }
 
     /**
-     * 任务类别 → 执行目标：
-     * 纯导航（go_to_place/return_home）、导航+动作（quality_inspection/charge/swap_battery）、
-     * 纯动作（pause_task/resume_task）、立即完成（cache_task_context）。
+     * 任务类别 → 执行目标（新版架构：调度只管移动，一律纯导航到位即完成）。
+     * 质检/充电启动等 start-activity 业务动作由上层应用直连 RMS 下发，调度不再代发；
+     * 引擎 action 执行阶段代码保留但本方法不再构造带 action 的目标（旧架构废弃）。
      */
     private TaskGoal buildGoal(String category, String businessTaskId, String taskTemplateCode,
                                String navStartPoint, String navEndPoint,
@@ -840,26 +910,20 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
         Map<String, Object> params = new java.util.HashMap<>(parameters == null ? Map.of() : parameters);
         // RMS 要求命令 description 携带 task_id（body_task_id），缺失会被拒绝
         params.putIfAbsent("task_id", businessTaskId);
-        // 顶层 task_template_code 注入透传（机器人侧 start-activity 按模板 code 查模板，非固定类型）
+        // 顶层 task_template_code 注入透传（上层应用 start-activity 按模板 code 查模板，非固定类型）
         if (taskTemplateCode != null && !taskTemplateCode.isBlank()) {
             params.putIfAbsent("task_template_code", taskTemplateCode);
         }
-        // 质检 label 契约：taskflow_id|task_template_code（顶层 taskflow_id 注入透传）
+        // 顶层 taskflow_id 注入透传（上层应用编排与回执关联用）
         if (taskflowId != null && !taskflowId.isBlank()) {
             params.putIfAbsent("taskflow_id", taskflowId);
         }
         String goalWaypoint = null;
-        String action = null;
-        String label = null;
         switch (category) {
             case TaskCategories.GO_TO_PLACE -> goalWaypoint = navEndPoint;
             case TaskCategories.RETURN_HOME -> goalWaypoint = str(params.get("home_waypoint")) != null
                     ? str(params.get("home_waypoint")) : navEndPoint;
-            case TaskCategories.QUALITY_INSPECTION -> {
-                goalWaypoint = navEndPoint;
-                action = TaskCategories.QUALITY_INSPECTION;
-                label = buildInspectionLabel(params);
-            }
+            case TaskCategories.QUALITY_INSPECTION -> goalWaypoint = navEndPoint;
             case TaskCategories.CHARGE -> {
                 // 任务流充电契约：目标充电位在 nav_start_point（历史命名）；兼容 charger_waypoint 参数
                 // 与 nav_end_point。目标不可解析（机器人侧 SLAM 目标名如 Goal_uX0Ef）→ 充电位分配器自动选桩
@@ -877,32 +941,22 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
                         params.put("charger_waypoint", allocated);
                     }
                 }
-                action = TaskCategories.CHARGE;
-                label = str(params.get("taskflow_id"));
             }
-            case TaskCategories.SWAP_BATTERY -> {
-                goalWaypoint = navEndPoint;
-                action = TaskCategories.SWAP_BATTERY;
-                label = str(params.get("taskflow_id"));
-            }
+            case TaskCategories.SWAP_BATTERY -> goalWaypoint = navEndPoint;
             case TaskCategories.PAUSE_TASK, TaskCategories.RESUME_TASK -> {
-                action = category;
-                label = str(params.get("taskflow_id"));
+                // 新版架构：纯控制类任务无导航无动作，立即完成（暂停/恢复由上层应用直连 RMS）
             }
             default -> {
                 // cache_task_context 等无导航无动作：立即完成
             }
         }
-        // 机器人本体契约：charge/return_home 等行为模板需要 parameters.destination（目标坐标对象）
-        if (action != null && goalWaypoint != null) {
-            injectDestination(params, goalWaypoint);
-        }
-        // 停靠等待点（parameters.end_point / endAction）：质检做完让出作业点，导航至停靠点等待
+        // 停靠等待点（parameters.end_point / endAction）：到位后让出作业点，导航至停靠点等待
         String standby = str(params.get("end_point"));
         if (standby == null) {
             standby = str(params.get("endPoint"));
         }
-        return new TaskGoal(category, null, goalWaypoint, action, label, standby, params);
+        // 新版架构：action/label 恒为 null（纯移动），引擎不再发 start-activity
+        return new TaskGoal(category, null, goalWaypoint, null, null, standby, params);
     }
 
     /** 目标点在当前地图可解析（id 或 name；无图视为不可解析）。 */

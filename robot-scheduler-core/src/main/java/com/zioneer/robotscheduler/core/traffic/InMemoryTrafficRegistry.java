@@ -37,6 +37,37 @@ public class InMemoryTrafficRegistry implements TrafficRegistry {
         this.eventSink = eventSink == null ? TrafficEventSink.NOOP : eventSink;
     }
 
+    /** 为持久化事务提供不可变快照；与观测快照不同，不合并预约和驻留。 */
+    synchronized TrafficSnapshot stateOf(String robot) {
+        OccupiedResources occupied = occupationByRobot.get(robot);
+        return new TrafficSnapshot(robot, occupied == null ? Set.of() : occupied.segmentIds(),
+                occupied == null ? Set.of() : occupied.waypointIds(), dwellWaypointByRobot.get(robot),
+                dwellSegmentByRobot.get(robot), isAwaitingStop(robot), isStopAccepted(robot),
+                occupied == null ? 0 : occupied.acquiredAtMillis(), null, null);
+    }
+
+    /** 仅由外层持久化锁在恢复或写入失败回滚时调用，不触发审计和停止确认门禁。 */
+    synchronized void restoreState(TrafficSnapshot state) {
+        String robot = state.robotCode();
+        OccupiedResources previous = occupationByRobot.remove(robot);
+        if (previous != null) {
+            previous.segmentIds().forEach(segment -> segmentOwner.remove(segment, robot));
+            previous.waypointIds().forEach(waypoint -> waypointOwner.remove(waypoint, robot));
+        }
+        dwellWaypointByRobot.remove(robot);
+        dwellSegmentByRobot.remove(robot);
+        stopHolds.remove(robot);
+        if (!state.segmentIds().isEmpty() || !state.waypointIds().isEmpty()) {
+            occupationByRobot.put(robot, new OccupiedResources(new HashSet<>(state.segmentIds()),
+                    new HashSet<>(state.waypointIds()), state.acquiredAtMillis()));
+            state.segmentIds().forEach(segment -> segmentOwner.put(segment, robot));
+            state.waypointIds().forEach(waypoint -> waypointOwner.put(waypoint, robot));
+        }
+        if (state.dwellWaypointId() != null) dwellWaypointByRobot.put(robot, state.dwellWaypointId());
+        if (state.dwellSegmentId() != null) dwellSegmentByRobot.put(robot, state.dwellSegmentId());
+        if (state.awaitingStop()) stopHolds.put(robot, state.stopAccepted());
+    }
+
     private void audit(String robotCode, String action, List<String> resourceIds) {
         audit(robotCode, action, resourceIds, null);
     }

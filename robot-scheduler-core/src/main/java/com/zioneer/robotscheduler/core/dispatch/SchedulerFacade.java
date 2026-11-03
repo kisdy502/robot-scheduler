@@ -70,4 +70,8 @@ public interface SchedulerFacade {
 
     /** GET /runtime/fleets/snapshot：运行时全量快照。 */
     Map<String, Object> runtimeSnapshot(String sceneCode, String fleetName, String rmfLevel, int taskLimit);
+    /** 外部业务作业通知；仅管理机器人使用状态，不执行质检或夹爪业务。 */
+    Map<String, Object> startExternalOperation(String taskflowId, String robotCode, String operationId);
+    Map<String, Object> finishExternalOperation(String taskflowId, String robotCode, String operationId);
+    Map<String, Object> robotUse(String robotCode);
 }

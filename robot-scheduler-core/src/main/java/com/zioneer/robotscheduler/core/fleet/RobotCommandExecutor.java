@@ -3,13 +3,15 @@ package com.zioneer.robotscheduler.core.fleet;
 import com.zioneer.robotscheduler.common.scheduler.SchedulerConstants;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.zioneer.robotscheduler.core.repository.RobotRuntimeRepository;
+import com.zioneer.robotscheduler.core.repository.InMemoryRobotRuntimeRepository;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -27,11 +29,11 @@ public class RobotCommandExecutor {
     private static final List<String> SUCCESS_STATUSES = List.of("COMPLETED", "SUCCESS", "SUCCEEDED");
 
     /** 回执失败状态集合（对齐旧栈 is_completion_failed）。 */
-    private static final List<String> FAILED_STATUSES = List.of("FAILED", "REJECTED", "TIMEOUT");
+    private static final List<String> FAILED_STATUSES = List.of(
+            "FAILED", "REJECTED", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED", "KILLED");
 
     private final RobotGateway gateway;
-
-    private final Map<String, AtomicInteger> cmdSeqByRobot = new ConcurrentHashMap<>();
+    private final RobotRuntimeRepository runtimeRepository;
 
     /** 每机器人当前待回执命令（串行：新命令提交前旧命令必须完成/取消）。 */
     private final Map<String, PendingCommand> pendingByRobot = new ConcurrentHashMap<>();
@@ -40,7 +42,14 @@ public class RobotCommandExecutor {
     private final Map<String, ReentrantLock> locksByRobot = new ConcurrentHashMap<>();
 
     public RobotCommandExecutor(RobotGateway gateway) {
+        this(gateway, new InMemoryRobotRuntimeRepository());
+    }
+
+    @Autowired
+    public RobotCommandExecutor(RobotGateway gateway,
+            RobotRuntimeRepository runtimeRepository) {
         this.gateway = gateway;
+        this.runtimeRepository = runtimeRepository;
     }
 
     /**
@@ -65,8 +74,9 @@ public class RobotCommandExecutor {
 
     /** 停止请求返回送达三态；成功接受后仍需状态帧确认实际停止。 */
     public RobotCmdResult stop(String robotCode, int runningCmdId, String bodyTaskId) {
-        int cmdId = nextCmdId(robotCode);
+        Integer cmdId = null;
         try {
+            cmdId = nextCmdId(robotCode);
             RobotCmdResult result = gateway.stop(robotCode, runningCmdId, cmdId, bodyTaskId);
             if (result == null) result = RobotCmdResult.RETRY;
             log.info("停止请求: robot={} cmdId={} result={}", robotCode, cmdId, result);
@@ -92,11 +102,12 @@ public class RobotCommandExecutor {
                 continue;
             }
             String status = str(completion.get("status"));
-            String completionId = str(completion.get("id"));
-            if (completionId != null) {
-                gateway.ackCompletion(robotCode, completionId);
+            if (!SUCCESS_STATUSES.contains(normalize(status)) && !FAILED_STATUSES.contains(normalize(status))) {
+                // 进行中或无法识别的状态不能结束命令，也不能 ack 后让 RMS 丢弃后续终态。
+                continue;
             }
-            pendingByRobot.remove(robotCode, pending);
+            String completionId = str(completion.get("id"));
+            if (!pendingByRobot.remove(robotCode, pending)) return false;
             if (SUCCESS_STATUSES.contains(normalize(status))) {
                 log.info("命令完成回执: robot={} uid={} status={}", robotCode, pending.uid(), status);
                 pending.future().complete(CommandResult.ok(completion));
@@ -106,6 +117,15 @@ public class RobotCommandExecutor {
                         status, detail);
                 pending.future().complete(CommandResult.failed(detail == null
                         ? "命令回执失败: status=" + status : detail, completion));
+            }
+            if (completionId != null) {
+                try {
+                    gateway.ackCompletion(robotCode, completionId);
+                } catch (RuntimeException failure) {
+                    // 回执已匹配，ack 故障不能反向抹掉命令结果或中断后续机器人的状态融合。
+                    log.warn("回执确认失败: robot_code={} cmd_id={} completion_id={} error={}",
+                            robotCode, pending.cmdId(), completionId, failure.getMessage());
+                }
             }
             return true;
         }
@@ -178,16 +198,28 @@ public class RobotCommandExecutor {
             String uid = "sched:" + robotCode + ":" + cmdId;
             PendingCommand pending = new PendingCommand(robotCode, cmdId, uid, kind,
                     new CompletableFuture<>());
+            if (pendingByRobot.putIfAbsent(robotCode, pending) != null) {
+                pending.future().complete(CommandResult.failed("机器人已有待回执命令，拒绝覆盖: " + kind));
+                return new CommandHandle(cmdId, uid, pending.future());
+            }
             // 重试送达（RETRY → 3 次退避 1s；IMPOSSIBLE 立即失败）；cmdId 固定不随重试变化
-            RobotCmdResult result = deliverWithRetry(robotCode, cmdId, call);
+            // 先登记再下发：完成帧可能先于 HTTP 响应到达，不能漏掉快速完成的命令。
+            RobotCmdResult result;
+            try {
+                result = deliverWithRetry(robotCode, cmdId, call);
+            } catch (RuntimeException failure) {
+                pendingByRobot.remove(robotCode, pending);
+                pending.future().complete(CommandResult.failed("命令下发异常: " + failure.getMessage()));
+                throw failure;
+            }
             if (result != RobotCmdResult.SUCCESS) {
+                pendingByRobot.remove(robotCode, pending);
                 String detail = result == RobotCmdResult.IMPOSSIBLE
                         ? "命令被拒绝（IMPOSSIBLE）: " + kind
                         : "命令重试耗尽（RETRY）: " + kind;
                 pending.future().complete(CommandResult.failed(detail));
                 return new CommandHandle(cmdId, uid, pending.future());
             }
-            pendingByRobot.put(robotCode, pending);
             return new CommandHandle(cmdId, uid, pending.future());
         } finally {
             lock.unlock();
@@ -241,7 +273,7 @@ public class RobotCommandExecutor {
     }
 
     private int nextCmdId(String robotCode) {
-        return cmdSeqByRobot.computeIfAbsent(robotCode, k -> new AtomicInteger()).incrementAndGet();
+        return runtimeRepository.nextCommandId(robotCode);
     }
 
     @FunctionalInterface

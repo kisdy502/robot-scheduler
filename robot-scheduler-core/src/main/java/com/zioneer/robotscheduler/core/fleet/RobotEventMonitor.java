@@ -232,6 +232,23 @@ public class RobotEventMonitor {
         }
     }
 
+    /**
+     * 机器人使用权变化（上层应用抢占/释放；调度领域事件，前端任务时间线可见）。
+     *
+     * @param taskflowId 占用方任务流标识
+     */
+    public void onUsage(String robotCode, String taskflowId, boolean occupied) {
+        try {
+            record(robotCode, "USAGE", occupied ? "OCCUPIED" : "RELEASED", "INFO",
+                    occupied ? null : taskflowId, taskflowId,
+                    occupied ? "机器人被任务流抢占: " + taskflowId
+                            : "机器人已释放（任务流 " + taskflowId + " 结束占用）",
+                    false);
+        } catch (Exception e) {
+            log.warn("占用事件记录失败: robot={} taskflow={} error={}", robotCode, taskflowId, e.getMessage());
+        }
+    }
+
     /** 事件保留期 GC（1h 周期，保留 7 天）。 */
     @Scheduled(fixedDelay = 3_600_000)
     public void gc() {

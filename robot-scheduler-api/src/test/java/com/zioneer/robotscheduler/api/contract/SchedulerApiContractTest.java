@@ -36,7 +36,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 调度端点 HTTP 契约测试（对齐旧栈 envelope / FastAPI detail 错误格式 / snake_case 字段）。
  */
 @WebMvcTest(controllers = {SchedulerTaskController.class, SchedulerResourceController.class,
-        RuntimeController.class})
+        RuntimeController.class, com.zioneer.robotscheduler.api.controller.RobotUseController.class})
 @Import(ApiWebConfiguration.class)
 class SchedulerApiContractTest {
 
@@ -45,6 +45,88 @@ class SchedulerApiContractTest {
 
     @MockBean
     private SchedulerFacade schedulerFacade;
+
+    // 新流程的幂等选项按原 parameters 透传，成功文案及冲突错误信封仍遵循旧接口契约。
+    @Test
+    void idempotentMove_preservesPublishedEnvelopeAnd409Detail() throws Exception {
+        when(schedulerFacade.gotoPlace(anyString(), anyString(), anyString(), anyString(), any(),
+                any(), any(), any(), any())).thenReturn(Map.of("scheduler_request_id", "same-request"))
+                .thenThrow(SchedulerHttpException.conflict("task_id already exists with a different request"));
+        String body = """
+                {"taskflow_id":1001,"task_id":2001,"robot_code":"R1","nav_target_point":"W1",
+                 "parameters":{"idempotent":true}}
+                """;
+        mockMvc.perform(post("/api/v1/scheduler/goto-place")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.msg").value("request published; execution pending"))
+                .andExpect(jsonPath("$.data.scheduler_request_id").value("same-request"));
+        verify(schedulerFacade).gotoPlace(eq("1001"), eq("2001"), eq("R1"), eq("W1"), any(),
+                any(), any(), any(), eq(Map.of("idempotent", true)));
+        mockMvc.perform(post("/api/v1/scheduler/goto-place")
+                        .contentType(MediaType.APPLICATION_JSON).content(body.replace("W1", "W2")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.detail").value("task_id already exists with a different request"));
+    }
+
+    @Nested
+    class ExternalOperationContract {
+        private final String body = "{\"taskflow_id\":\"1001\",\"robot_code\":\"R1\",\"operation_id\":\"photo-1\"}";
+
+        // 外部作业结束未能持久化时返回 503 detail，不能包装成已经释放占用的成功响应。
+        @Test
+        void operationPersistenceFailureReturns503Detail() throws Exception {
+            when(schedulerFacade.finishExternalOperation("1001", "R1", "photo-1"))
+                    .thenThrow(new SchedulerHttpException(503, "robot usage could not be persisted"));
+            mockMvc.perform(post("/api/v1/scheduler/external-operations/finish")
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.detail").value("robot usage could not be persisted"))
+                    .andExpect(jsonPath("$.status").doesNotExist());
+        }
+
+        // 外部作业开始和结束接口沿用旧成功信封，时间字段必须返回 Unix 毫秒。
+        @Test
+        void startAndFinishUseLegacyEnvelopeAndUnixMillis() throws Exception {
+            when(schedulerFacade.startExternalOperation("1001", "R1", "photo-1"))
+                    .thenReturn(Map.of("robot_code", "R1", "state", "running", "started_at", 1793613600000L));
+            mockMvc.perform(post("/api/v1/scheduler/external-operations/start")
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.status").value(0))
+                    .andExpect(jsonPath("$.msg").value("success"))
+                    .andExpect(jsonPath("$.data.started_at").value(1793613600000L))
+                    .andExpect(jsonPath("$.timestamp").isNumber());
+            when(schedulerFacade.finishExternalOperation("1001", "R1", "photo-1"))
+                    .thenReturn(Map.of("state", "finished", "finished_at", 1793613601000L));
+            mockMvc.perform(post("/api/v1/scheduler/external-operations/finish")
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.data.state").value("finished"))
+                    .andExpect(jsonPath("$.data.finished_at").value(1793613601000L));
+        }
+
+        // 缺少必填字段返回 400，使用权冲突返回 409，并保持 FastAPI 风格 detail 错误结构。
+        @Test
+        void invalidOperationIs400AndOwnershipConflictIs409Detail() throws Exception {
+            mockMvc.perform(post("/api/v1/scheduler/external-operations/start")
+                            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.detail").exists());
+            when(schedulerFacade.startExternalOperation("1001", "R1", "photo-1"))
+                    .thenThrow(SchedulerHttpException.conflict("robot owned by another taskflow"));
+            mockMvc.perform(post("/api/v1/scheduler/external-operations/start")
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.detail").value("robot owned by another taskflow"));
+        }
+
+        // 通过独立使用状态接口查询机器人和持有者，响应沿用现有成功信封。
+        @Test
+        void usageCanBeQueriedWithoutChangingLegacyResourceResponse() throws Exception {
+            when(schedulerFacade.robotUse("R1"))
+                    .thenReturn(Map.of("robot_code", "R1", "taskflow_id", "1001"));
+            mockMvc.perform(get("/api/v1/scheduler/robot-use").param("robot_code", "R1"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.data.taskflow_id").value("1001"));
+        }
+    }
 
     @Nested
     class EnvelopeContract {

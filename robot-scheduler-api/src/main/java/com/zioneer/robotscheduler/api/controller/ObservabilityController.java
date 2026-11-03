@@ -38,6 +38,7 @@ public class ObservabilityController {
     private final TrafficRegistry trafficRegistry;
     private final ActiveRouteRegistry routeRegistry;
     private final com.zioneer.robotscheduler.core.repository.RobotEventRepository robotEventRepository;
+    private final com.zioneer.robotscheduler.core.repository.ExternalActivityRepository externalActivityRepository;
 
     @Operation(summary = "任务历史分页查询（含失败原因 message；重启不丢）")
     @GetMapping("/tasks")
@@ -145,6 +146,33 @@ public class ObservabilityController {
                     row.put("count", event.getEventCount());
                     row.put("first_at", event.getFirstAtMillis());
                     row.put("last_at", event.getLastAtMillis());
+                    return row;
+                }).toList();
+        return Result.ok(PageResult.of(list, total, safePage, safeSize));
+    }
+
+    @Operation(summary = "外部动作回执镜像（上层应用直连 RMS 的质检/夹爪等动作结果，按 body_task_id 与移动任务聚合）")
+    @GetMapping("/activities")
+    public Result<PageResult<Map<String, Object>>> externalActivities(
+            @Parameter(description = "机器人编码") @RequestParam(name = "robot_code", required = false) String robotCode,
+            @Parameter(description = "业务任务 ID（task_id）") @RequestParam(name = "task_id", required = false) String taskId,
+            @RequestParam(name = "page_num", required = false, defaultValue = "1") int pageNum,
+            @RequestParam(name = "page_size", required = false, defaultValue = "50") int pageSize) {
+        int safePage = Math.max(1, pageNum);
+        int safeSize = Math.min(Math.max(1, pageSize), 200);
+        long total = externalActivityRepository.count(robotCode, taskId);
+        List<Map<String, Object>> list = externalActivityRepository
+                .findPage(robotCode, taskId, (safePage - 1) * safeSize, safeSize)
+                .stream().map(activity -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", String.valueOf(activity.getId()));
+                    row.put("robot_code", activity.getRobotCode());
+                    row.put("body_task_id", activity.getBodyTaskId());
+                    row.put("action_type", activity.getActionType());
+                    row.put("action_status", activity.getActionStatus());
+                    row.put("result_report", activity.getResultReport());
+                    row.put("robot_reported_ms", activity.getRobotReportedMillis());
+                    row.put("created_at", activity.getCreatedAtMillis());
                     return row;
                 }).toList();
         return Result.ok(PageResult.of(list, total, safePage, safeSize));

@@ -65,7 +65,8 @@ robot-scheduler/
 | 类 | 职责 | 关键方法 |
 |---|---|---|
 | `TrafficRegistry` | 占用端口（段+点+驻留三级） | `tryAcquire(robot, segments, waypoints, lease)` 原子占用；`releaseSegments` 渐进释放；`updateDwell(robot, wpId, segId)` 驻留登记；`occupiedSegments/Waypoints` 规划障碍输入 |
-| `InMemoryTrafficRegistry` | 默认实现（synchronized 单锁，<500 台够用） | 冲突判定含：任务占用互斥 + 驻留点/段互斥 + 对向段互斥（统一 ID 天然实现） |
+| `PersistentTrafficRegistry` | 单活正式实现，运行正本同步持久化 | 写入成功才确认申请/释放；重启保留原图资源并重新停止确认，详见 runtime-recovery.md |
+| `InMemoryTrafficRegistry` | 隔离测试实现及持久化实现的内存互斥内核 | 冲突判定含：任务占用互斥 + 驻留点/段互斥 + 对向段互斥（统一 ID 天然实现） |
 | `DeadlockMonitor` | 循环等待组检测（点/段依赖 + 强连通分量，5s 周期） | `detect()` → 循环等待组（告警级，不自动让路） |
 | `WaitIntentRegistry` | 等待意图登记（点/段 + 所属任务，规划失败/申请失败/段前复检均覆盖） | `record(robot, task, segments, waypoints)` / 持续刷新，退出等待按任务清理 |
 

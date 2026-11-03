@@ -1,5 +1,6 @@
 package com.zioneer.robotscheduler.core.charger;
 
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
 import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
 import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
 import com.zioneer.robotscheduler.core.map.MapManager;
@@ -26,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class LowBatteryChargeSupervisor {
 
+    private final RobotAvailabilityService availability;
     private final FleetStateMirror fleetStateMirror;
     private final TaskStateMirror taskStateMirror;
     private final ChargerPoolPort chargerPool;
@@ -41,7 +43,9 @@ public class LowBatteryChargeSupervisor {
                                       ChargerPoolPort chargerPool, MapManager mapManager,
                                       TaskExecutionEngine executionEngine,
                                       com.zioneer.robotscheduler.core.repository.TaskRecordRepository taskRecordRepository,
-                                      ChargeProperties properties) {
+                                      ChargeProperties properties,
+                                      RobotAvailabilityService availability) {
+        this.availability = availability;
         this.fleetStateMirror = fleetStateMirror;
         this.taskStateMirror = taskStateMirror;
         this.chargerPool = chargerPool;
@@ -62,19 +66,21 @@ public class LowBatteryChargeSupervisor {
                 if (!shouldRetreat(robot)) {
                     continue;
                 }
-                Optional<ChargerInfo> charger = allocateCharger(robot);
-                if (charger.isEmpty()) {
-                    log.warn("低电量机器人无可用充电位: robot={} battery={}",
-                            robot.getRobotCode(), robot.getBattery());
-                    continue;
-                }
-                submitRetreat(robot, charger.get());
+                availability.runIfAllocatable(robot, null, () -> {
+                    Optional<ChargerInfo> charger = allocateCharger(robot);
+                    if (charger.isEmpty()) {
+                        log.warn("低电量机器人无可用充电位: robot={} battery={}",
+                                robot.getRobotCode(), robot.getBattery());
+                        return;
+                    }
+                    submitRetreat(robot, charger.get());
+                });
             }
         }
     }
 
     boolean shouldRetreat(RobotSnapshot robot) {
-        if (!robot.isOnline() || !robot.isDispatchable()) {
+        if (!availability.canAllocate(robot, null)) {
             return false;
         }
         if (!"idle".equals(robot.getMode())) {

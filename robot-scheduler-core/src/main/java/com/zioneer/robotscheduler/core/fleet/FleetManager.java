@@ -50,6 +50,7 @@ public class FleetManager {
     /** 机器人离开充电位超过此距离（米）自动释放充电桩。 */
     static final double CHARGER_RELEASE_DISTANCE_METERS = 2.0;
 
+    private final RobotAvailabilityService availability;
     private final RobotStateSource stateSource;
     private final FleetStateMirror fleetStateMirror;
     private final TaskStateMirror taskStateMirror;
@@ -60,6 +61,7 @@ public class FleetManager {
     private final FleetPollingProperties properties;
     private final RobotCommandExecutor commandExecutor;
     private final com.zioneer.robotscheduler.core.charger.ChargerPoolPort chargerPool;
+    private final ExternalActivityMirror externalActivityMirror;
 
     /** 离图告警限频：robotCode → 上次告警时间戳。 */
     private final Map<String, Long> offGraphWarnAt = new ConcurrentHashMap<>();
@@ -80,7 +82,10 @@ public class FleetManager {
                         RobotEventMonitor eventMonitor,
                         FleetPollingProperties properties,
                         RobotCommandExecutor commandExecutor,
-                        com.zioneer.robotscheduler.core.charger.ChargerPoolPort chargerPool) {
+                        com.zioneer.robotscheduler.core.charger.ChargerPoolPort chargerPool,
+                        RobotAvailabilityService availability,
+                        ExternalActivityMirror externalActivityMirror) {
+        this.availability = availability;
         this.stateSource = stateSource;
         this.fleetStateMirror = fleetStateMirror;
         this.taskStateMirror = taskStateMirror;
@@ -91,12 +96,14 @@ public class FleetManager {
         this.properties = properties;
         this.commandExecutor = commandExecutor;
         this.chargerPool = chargerPool;
+        this.externalActivityMirror = externalActivityMirror;
     }
 
     /**
      * 状态轮询（默认 1Hz）：失败时保持上一帧镜像并告警（对齐旧栈 stale 语义：由 sweep 判定过期）。
      */
-    @Scheduled(fixedDelayString = "${robot.scheduler.fleet.state-interval-millis:1000}")
+    @Scheduled(fixedDelayString = "${robot.scheduler.fleet.state-interval-millis:1000}",
+            scheduler = "fleetStateScheduler")
     public void pollStates() {
         List<RobotSnapshot> frames;
         try {
@@ -113,7 +120,8 @@ public class FleetManager {
     /**
      * 清单轮询（默认 0.1Hz）：机器人上下线发现 + 静态信息合并。
      */
-    @Scheduled(fixedDelayString = "${robot.scheduler.fleet.inventory-interval-millis:10000}")
+    @Scheduled(fixedDelayString = "${robot.scheduler.fleet.inventory-interval-millis:10000}",
+            scheduler = "fleetInventoryScheduler")
     public void pollInventory() {
         List<RobotSnapshot> inventory;
         try {
@@ -221,7 +229,7 @@ public class FleetManager {
             // 外部任务保底：位置移动检测（上位机直发任务时 RMS 不回报执行状态，调度靠位移自保）
             boolean moving = updateMovingState(snapshot);
             snapshot.setMode(deriveMode(snapshot, moving));
-            snapshot.setDispatchable(evaluateDispatchable(snapshot));
+            availability.updateReadiness(snapshot, evaluateDispatchable(snapshot));
             fleetStateMirror.upsert(snapshot);
             // 地图一致性事件（变化检测在 monitor 内部去重）
             eventMonitor.onMapIdentity(snapshot.getRobotCode(), snapshot.getSlamMapCode(),
@@ -237,8 +245,9 @@ public class FleetManager {
             updateDwellState(snapshot, moving);
             // 充电桩基于位置自动释放：机器人离开充电位即释放（不依赖任务终态）
             releaseChargerIfDeparted(snapshot);
-            // 完成回执闭环：当前 pending 命令匹配 → 结束执行 Future
+            // 回执信箱：先镜像外部动作（观测档案，非调度命令），再走调度自身命令认领闭环
             if (frame.getCompletedCommands() != null && !frame.getCompletedCommands().isEmpty()) {
+                externalActivityMirror.onReceipts(snapshot.getRobotCode(), frame.getCompletedCommands());
                 commandExecutor.onCompletedCommands(snapshot.getRobotCode(), frame.getCompletedCommands());
             }
         }
@@ -363,7 +372,7 @@ public class FleetManager {
             stopObservations.remove(robot);
             nextStopRetryAt.remove(robot);
             syncChargerPoolFromDwell(robot, attachment.waypointId());
-            snapshot.setDispatchable(evaluateDispatchable(snapshot));
+            availability.updateReadiness(snapshot, evaluateDispatchable(snapshot));
             fleetStateMirror.upsert(snapshot);
             log.info("机器人停止已确认，剩余预约转为实际驻留: robot={} waypoint={} segment={}",
                     robot, attachment.waypointId(), attachment.segmentId());

@@ -21,6 +21,11 @@ public class MapBootstrapRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        loadMap();
+        mapManager.assertRecoveryMapLoaded();
+    }
+
+    private void loadMap() {
         if (mapManager.loadFromArchive()) {
             return;
         }

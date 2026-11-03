@@ -1,5 +1,7 @@
 package com.zioneer.robotscheduler.core.task;
 
+import com.zioneer.robotscheduler.core.fleet.TaskAssignmentRegistry;
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
 import com.zioneer.robotscheduler.core.event.SchedulerEventBus;
 import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
 import com.zioneer.robotscheduler.core.fleet.RobotCmdResult;
@@ -44,6 +46,7 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class TaskExecutionEngineTest {
+    private final TaskAssignmentRegistry ownershipRegistry = new TaskAssignmentRegistry();
 
     private static final String SIMPLE_MAP = """
             {
@@ -83,6 +86,96 @@ class TaskExecutionEngineTest {
     private TaskExecutionEngine engine;
     private RobotCommandExecutor commandExecutor;
 
+    // 拓扑吸附到目标点但实际还差一米时，仍需下发最终导航并等回执，不能直接宣告到点。
+    @Test
+    void attachedToTargetButNotAtPose_stillNavigatesBeforeCompleting() {
+        robotReady("R001", 5, 0);
+        String task = engine.submit(record("near-target", "go_to_place", "R001"), "R001",
+                new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
+        ArgumentCaptor<Integer> command = ArgumentCaptor.forClass(Integer.class);
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(gateway).navigate(eq("R001"),
+                command.capture(), anyString(), eq(6.0), eq(0.0), anyDouble(), any(), any()));
+        assertThat(trafficRegistry.occupiedWaypoints()).contains("WP_B");
+        completeNavigationAt("R001", command.getValue(), 6, 0);
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(publisher).publishEvent(
+                org.mockito.ArgumentMatchers.argThat((Object event) -> event instanceof TaskStateEvent state
+                        && task.equals(state.taskId()) && "completed".equals(state.status()))));
+        assertThat(trafficRegistry.dwellOwner("WP_B")).isEqualTo("R001");
+    }
+
+    // 零边路线最终到位也要应用楼层和区域限速，不能因没有拓扑边就下发全局最高速度。
+    @Test
+    void finalApproach_keepsFloorAndZoneSpeedLimits() {
+        mapManager.activateFromJson(SIMPLE_MAP.replace("\"defaultMaxSpeed\": 1.0", "\"defaultMaxSpeed\": 0.2")
+                .replace("\"paths\": [", """
+                        "zoneConstraints": [{"id":"slow","type":"slowDown","maxSpeed":0.1,
+                        "vertices":[[4.8,-1],[6.2,-1],[6.2,1],[4.8,1]]}], "paths": [
+                        """), null, null);
+        robotReady("R001", 5, 0);
+        var record = record("near-slow", "go_to_place", "R001");
+        String task = engine.submit(record, "R001",
+                new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(gateway).navigate(eq("R001"),
+                anyInt(), anyString(), eq(6.0), eq(0.0), anyDouble(), eq(0.1), any()));
+        engine.cancel(task, record, "R001", "test cleanup");
+    }
+
+    // 禁行区域即使没有落在待走的拓扑边上，也不能被目标附近的最终导航绕过。
+    @Test
+    void finalApproach_crossingForbiddenZoneDoesNotSendCommand() {
+        mapManager.activateFromJson(SIMPLE_MAP.replace("\"paths\": [", """
+                "zoneConstraints": [{"id":"blocked","type":"forbidden","maxSpeed":0,
+                "vertices":[[4.8,-1],[5.2,-1],[5.2,1],[4.8,1]]}], "paths": [
+                """), null, null);
+        robotReady("R001", 5, 0);
+        String task = engine.submit(record("near-forbidden", "go_to_place", "R001"), "R001",
+                new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(publisher).publishEvent(
+                org.mockito.ArgumentMatchers.argThat((Object event) -> event instanceof TaskStateEvent state
+                        && task.equals(state.taskId()) && "failed".equals(state.status()))));
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).navigate(anyString(), anyInt(),
+                anyString(), anyDouble(), anyDouble(), anyDouble(), any(), any());
+    }
+
+    // 持有者的移动任务在外部作业期间等待，结束后恢复导航；权限身份取顶层字段而非透传参数。
+    @Test
+    void ownedNavigationWaitsForExternalOperationThenResumes() {
+        robotReady("R001", 0, 0);
+        var robot = fleetStateMirror.list().getFirst();
+        robot.setNavigationReady(true);
+        robot.setDispatchable(false);
+        ownershipRegistry.assign("owner", "R001");
+        ownershipRegistry.startOperation("owner", "R001", "photo");
+        var record = record("owned-move", "go_to_place", "R001");
+        record.setPayload(Map.of("taskflow_id", "owner"));
+        String id = engine.submit(record, "R001",
+                new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of("taskflow_id", "untrusted")));
+        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() ->
+                org.mockito.Mockito.verify(publisher).publishEvent(org.mockito.ArgumentMatchers.argThat(
+                        (Object e) -> e instanceof TaskStateEvent event && "queued".equals(event.status())
+                                && event.message() != null && event.message().contains("photo"))));
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).navigate(anyString(), anyInt(),
+                anyString(), anyDouble(), anyDouble(), anyDouble(), any(), any());
+        ownershipRegistry.finishOperation("owner", "R001", "photo");
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
+                org.mockito.Mockito.verify(gateway).navigate(anyString(), anyInt(), anyString(),
+                        anyDouble(), anyDouble(), anyDouble(), any(), any()));
+        engine.cancel(id, record, "R001", "cleanup");
+    }
+
+    // 取消历史孤儿任务时，若机器人正在执行外部作业，应拒绝停止且不向 RMS 发 stop。
+    @Test
+    void orphanCancellationCannotStopExternalBusinessOperation() {
+        ownershipRegistry.assign("owner", "R001");
+        ownershipRegistry.startOperation("owner", "R001", "photo");
+        var record = record("orphan", "go_to_place", "R001");
+        record.setPayload(Map.of("taskflow_id", "owner"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                engine.cancel("missing", record, "R001", "cancel"))
+                .isInstanceOf(com.zioneer.robotscheduler.core.dispatch.SchedulerHttpException.class);
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).stop(anyString(), anyInt(), anyInt(), any());
+    }
+
     @BeforeEach
     void setUp() throws Exception {
         fleetStateMirror = new FleetStateMirror();
@@ -100,11 +193,13 @@ class TaskExecutionEngineTest {
         engine = new TaskExecutionEngine(commandExecutor, trafficRegistry, mapManager,
                 fleetStateMirror, new SchedulerEventBus(publisher),
                 new com.zioneer.robotscheduler.core.assign.CostBasedTaskAssigner(fleetStateMirror,
-                        mapManager, assignProperties),
+                        mapManager, assignProperties,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry())),
                 assignProperties,
                 waitIntents,
                 new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(mapManager),
-                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class));
+                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class), ownershipRegistry,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
         engine.robotReadyTimeoutSeconds = 2;
         engine.navigationTimeoutBaseSeconds = 1;
         engine.segmentConservativeSpeedMps = 1000;
@@ -469,11 +564,13 @@ class TaskExecutionEngineTest {
         TaskExecutionEngine engine3 = new TaskExecutionEngine(commandExecutor, trafficRegistry, mapManager,
                 fleetStateMirror, new SchedulerEventBus(publisher),
                 new com.zioneer.robotscheduler.core.assign.CostBasedTaskAssigner(fleetStateMirror,
-                        mapManager, assignProperties),
+                        mapManager, assignProperties,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry())),
                 assignProperties,
                 waitIntents,
                 new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(mapManager),
-                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class));
+                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class), ownershipRegistry,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
         engine3.robotReadyTimeoutSeconds = 2;
         engine3.navigationTimeoutBaseSeconds = 5;
         engine3.segmentConservativeSpeedMps = 1000;
@@ -526,11 +623,13 @@ class TaskExecutionEngineTest {
         var chargeEngine = new TaskExecutionEngine(commandExecutor, trafficRegistry, chargeMapManager,
                 fleetStateMirror, new SchedulerEventBus(publisher),
                 new com.zioneer.robotscheduler.core.assign.CostBasedTaskAssigner(fleetStateMirror,
-                        chargeMapManager, assignProperties),
+                        chargeMapManager, assignProperties,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry())),
                 assignProperties,
                 waitIntents,
                 new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(chargeMapManager),
-                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class));
+                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class), ownershipRegistry,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
         chargeEngine.robotReadyTimeoutSeconds = 2;
         chargeEngine.navigationTimeoutBaseSeconds = 1;
 

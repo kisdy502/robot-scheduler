@@ -1,5 +1,7 @@
 package com.zioneer.robotscheduler.rms.client;
 
+import com.zioneer.robotscheduler.core.fleet.TaskAssignmentRegistry;
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zioneer.robotscheduler.core.fleet.FleetManager;
 import com.zioneer.robotscheduler.core.fleet.FleetPollingProperties;
@@ -33,6 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class LiveRmsIntegrationTest {
+    private final TaskAssignmentRegistry ownershipRegistry = new TaskAssignmentRegistry();
 
     private static final String RMS_BASE_URL = System.getenv()
             .getOrDefault("RMS_LIVE_BASE_URL", "http://127.0.0.1:18083");
@@ -76,7 +79,9 @@ class LiveRmsIntegrationTest {
                 pollingProperties,
                 new com.zioneer.robotscheduler.core.fleet.RobotCommandExecutor(
                         Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotGateway.class)),
-                new com.zioneer.robotscheduler.core.charger.InMemoryChargerPool());
+                new com.zioneer.robotscheduler.core.charger.InMemoryChargerPool(),
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()),
+                new com.zioneer.robotscheduler.core.fleet.ExternalActivityMirror());
     }
 
     @Test

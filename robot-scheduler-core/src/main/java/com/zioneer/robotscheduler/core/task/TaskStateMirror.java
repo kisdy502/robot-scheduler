@@ -100,7 +100,25 @@ public class TaskStateMirror {
     }
 
     public Optional<TaskStateEvent> find(String rmfTaskId) {
-        return Optional.ofNullable(statesByTaskId.get(rmfTaskId));
+        TaskStateEvent current = statesByTaskId.get(rmfTaskId);
+        if (current != null) return Optional.of(current);
+        com.zioneer.robotscheduler.core.repository.TaskStateRecordRepository repository;
+        synchronized (repositoryLock) {
+            repository = recordRepository;
+        }
+        if (repository == null) return Optional.empty();
+        // 重启或终态缓存清理后，查询仍需读到已落库的真实终态，不能退回永久 queued。
+        Optional<TaskStateEvent> stored = repository.findByRmfTaskId(rmfTaskId).map(record -> {
+            Map<String, Object> detail = new java.util.HashMap<>(
+                    record.getDetail() == null ? Map.of() : record.getDetail());
+            if (record.getInspectionResult() != null) detail.put("inspection_result", record.getInspectionResult());
+            return TaskStateEvent.withMessage(record.getRmfTaskId(), record.getStatus(), record.getCategory(),
+                    detail, record.getCancellation(), null, record.getRobotCode(), null, record.getMessage(),
+                    record.getUpdatedAtMillis() == null ? 0 : record.getUpdatedAtMillis());
+        });
+        // 查库期间可能收到更新的实时事件；历史结果只做回退，不覆盖新状态或重新撑大内存缓存。
+        current = statesByTaskId.get(rmfTaskId);
+        return current == null ? stored : Optional.of(current);
     }
 
     public List<TaskStateEvent> list() {

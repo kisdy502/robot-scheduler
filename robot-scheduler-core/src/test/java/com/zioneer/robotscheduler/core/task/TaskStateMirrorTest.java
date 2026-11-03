@@ -19,6 +19,47 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class TaskStateMirrorTest {
 
+    // 重启后查询历史终态仍需保留取消标记，避免业务把取消产生的 completed 当作到点成功。
+    @Test
+    void emptyRuntimeMirror_readsPersistedTerminalAndCancellation() {
+        var states = new InMemoryTaskStateRepository();
+        var record = new TaskStateRecord();
+        record.setRmfTaskId("move.old");
+        record.setStatus("completed");
+        record.setCategory("go_to_place");
+        record.setCancellation(Map.of("labels", List.of("reason=operator")));
+        record.setMessage("活动任务已取消");
+        record.setUpdatedAtMillis(123L);
+        states.upsert(record);
+        var restarted = new TaskStateMirror();
+        restarted.bindRepositories(states, new InMemoryTaskRecordRepository());
+        assertThat(restarted.find("move.old")).isPresent().get().satisfies(event -> {
+            assertThat(event.status()).isEqualTo("completed");
+            assertThat(event.cancellation()).isEqualTo(record.getCancellation());
+            assertThat(event.message()).isEqualTo("活动任务已取消");
+            assertThat(event.emittedAtMillis()).isEqualTo(123L);
+        });
+        assertThat(restarted.list()).isEmpty();
+    }
+
+    // 历史查库期间若收到新实时事件，查询必须返回新事件，不能被旧库记录回退覆盖。
+    @Test
+    void liveEventArrivingDuringHistoricalRead_winsOverStoredRecord() {
+        var states = org.mockito.Mockito.mock(TaskStateRecordRepository.class);
+        var mirror = new TaskStateMirror();
+        mirror.bindRepositories(states, new InMemoryTaskRecordRepository());
+        var old = new TaskStateRecord();
+        old.setRmfTaskId("move.current");
+        old.setStatus("queued");
+        org.mockito.Mockito.when(states.findByRmfTaskId("move.current")).thenAnswer(call -> {
+            mirror.onTaskStateEvent(TaskStateEvent.withMessage("move.current", "underway", "go_to_place",
+                    Map.of(), null, "fleet", "R1", null, "导航中", 200L));
+            return Optional.of(old);
+        });
+        assertThat(mirror.find("move.current")).isPresent().get()
+                .satisfies(event -> assertThat(event.status()).isEqualTo("underway"));
+    }
+
     // 状态事件携带机器人：robot_code 回写自动分配的任务记录（已有值不覆盖），状态镜像同步落库
     @Test
     void eventWithRobot_writesBackRobotCodeToRecord() {

@@ -19,7 +19,8 @@ public class DispatchTaskRequest {
     private String taskflowId;
 
     @NotBlank
-    @Schema(description = "业务任务 id", requiredMode = Schema.RequiredMode.REQUIRED)
+    @Schema(description = "业务任务 id；parameters.idempotent=true 时作为幂等键，重做需换新 id",
+            requiredMode = Schema.RequiredMode.REQUIRED)
     private String taskId;
 
     @Schema(description = "机器人编码；为空时自动分配")
@@ -54,6 +55,6 @@ public class DispatchTaskRequest {
     @Schema(description = "最早开始时间（unix 毫秒字符串）")
     private String earliestStartTime;
 
-    @Schema(description = "附加参数")
+    @Schema(description = "附加参数；idempotent=true 时相同任务 id 的相同请求不重复执行，改变请求返回 409")
     private Map<String, Object> parameters = Map.of();
 }

@@ -25,6 +25,29 @@ public class MapManager {
     private long generation;
     private Runnable onActivated;
     private BooleanSupplier activationBlocked = () -> false;
+    private String recoveryMapName;
+    private String recoveryMapVersion;
+
+    /** 恢复的占用只能解释为原地图资源；版本不符时停止启动，不能把旧占用套到新图。 */
+    public synchronized void requireRecoveryMap(String name, String version) {
+        if (name == null || version == null) {
+            throw new MapActivationConflictException("恢复占用缺少地图版本，请先核对持久化状态");
+        }
+        if ((recoveryMapName != null && (!name.equals(recoveryMapName) || !version.equals(recoveryMapVersion)))
+                || (activeSnapshot != null && (!name.equals(activeSnapshot.mapName())
+                || !version.equals(activeSnapshot.version())))) {
+            throw new MapActivationConflictException("恢复占用与加载地图版本不一致");
+        }
+        recoveryMapName = name;
+        recoveryMapVersion = version;
+    }
+
+    /** 有恢复占用时不允许悄悄退回无图模式，否则无法解释旧资源和确认实际驻留。 */
+    public synchronized void assertRecoveryMapLoaded() {
+        if (recoveryMapName != null && activeSnapshot == null) {
+            throw new MapActivationConflictException("恢复占用所需地图未加载，停止启动");
+        }
+    }
 
     public MapManager(MapMetadataParser parser, MapArchiveRepository archiveRepository) {
         this.parser = parser;
@@ -120,7 +143,12 @@ public class MapManager {
         if (activeBindings > 0) {
             throw new MapActivationConflictException("地图仍有 " + activeBindings + " 个使用绑定，请等待任务退出后再切换");
         }
-        if (activationBlocked.getAsBoolean()) {
+        boolean initialLoad = activeSnapshot == null && !persist && recoveryMapName != null;
+        if (initialLoad && recoveryMapName != null && (!recoveryMapName.equals(metadata.getMapName())
+                || !recoveryMapVersion.equals(metadata.getVersionInfo().getVersion()))) {
+            throw new MapActivationConflictException("启动地图与恢复占用的地图版本不一致");
+        }
+        if (!initialLoad && activationBlocked.getAsBoolean()) {
             throw new MapActivationConflictException("仍有交通占用（含机器人驻留），请确认机器人停止并解除占用后再切换");
         }
         // 构图失败时旧快照、存档均不变；门禁通过后才执行清理与存档。

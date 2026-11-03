@@ -24,6 +24,10 @@ public interface TaskAssigner {
      * 带评分明细的选择（分配透明化）：返回全部候选的 ETA/电量惩罚/总分与胜出者。
      * 默认实现退化为无 trace 的 select；代价分配实现覆盖此方法。
      */
+    default AssignmentDecision selectWithTrace(TaskGoal goal, String fleetName, String robotGroup, String owner) {
+        return selectWithTrace(goal, fleetName, robotGroup);
+    }
+
     default AssignmentDecision selectWithTrace(TaskGoal goal, String fleetName, String robotGroup) {
         return new AssignmentDecision(select(goal, fleetName, robotGroup).map(
                 robot -> new AssignmentDecision.AssignmentCandidate(robot.getRobotCode(), robot.getRobotName(),

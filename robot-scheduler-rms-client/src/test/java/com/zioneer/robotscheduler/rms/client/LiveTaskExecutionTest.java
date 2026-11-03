@@ -1,5 +1,7 @@
 package com.zioneer.robotscheduler.rms.client;
 
+import com.zioneer.robotscheduler.core.fleet.TaskAssignmentRegistry;
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zioneer.robotscheduler.core.event.SchedulerEventBus;
 import com.zioneer.robotscheduler.core.fleet.FleetManager;
@@ -42,6 +44,7 @@ import static org.awaitility.Awaitility.await;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class LiveTaskExecutionTest {
+    private final TaskAssignmentRegistry ownershipRegistry = new TaskAssignmentRegistry();
 
     private static final String RMS_BASE_URL = System.getenv()
             .getOrDefault("RMS_LIVE_BASE_URL", "http://127.0.0.1:18083");
@@ -88,18 +91,22 @@ class LiveTaskExecutionTest {
         engine = new TaskExecutionEngine(commandExecutor, new InMemoryTrafficRegistry(), mapManager,
                 mirror, new SchedulerEventBus(publisher),
                 new com.zioneer.robotscheduler.core.assign.CostBasedTaskAssigner(mirror, mapManager,
-                        new com.zioneer.robotscheduler.core.assign.TaskAssignProperties()),
+                        new com.zioneer.robotscheduler.core.assign.TaskAssignProperties(),
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry())),
                 new com.zioneer.robotscheduler.core.assign.TaskAssignProperties(),
                 new com.zioneer.robotscheduler.core.traffic.WaitIntentRegistry(),
                 new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(mapManager),
-                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class));
+                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class), ownershipRegistry,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
         fleetManager = new FleetManager(stateSource, mirror,
                 new com.zioneer.robotscheduler.core.task.TaskStateMirror(), mapManager,
                 new InMemoryTrafficRegistry(),
                 new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(mapManager),
                 org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class),
                 pollingProperties, commandExecutor,
-                new com.zioneer.robotscheduler.core.charger.InMemoryChargerPool());
+                new com.zioneer.robotscheduler.core.charger.InMemoryChargerPool(),
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()),
+                new com.zioneer.robotscheduler.core.fleet.ExternalActivityMirror());
         // 真实轮询一帧，建立机器人镜像
         fleetManager.pollStates();
         // 状态轮询线程：回执闭环依赖 completed_commands 持续喂给命令执行器

@@ -2,7 +2,7 @@
 
 > 调度系统存储分三层：**PostgreSQL（持久正本）** + **进程内存（运行态）** + **Redis（已配置连接、当前未使用，多实例演进预留）**。
 
-## 一、PostgreSQL 表（8 张业务表，Flyway 管理）
+## 一、PostgreSQL 表（Flyway 管理）
 
 数据库：`scheduler_service`（调度 PG 实例 55432）
 
@@ -96,24 +96,24 @@
 | t_charger | 2（C1/C2） |
 | t_map_metadata | 1 |
 
-## 二、进程内存态（不落库，重启重建）
+## 二、内存镜像与执行上下文
 
 | 数据 | 类 | 说明 |
 |---|---|---|
 | 机器人实时镜像 | `FleetStateMirror` | 1Hz 状态帧融合（位置/电量/mode/可派），15s 无帧判离线 |
 | 任务状态内存镜像 | `TaskStateMirror` | 事件驱动（与 t_task_state 双写，内存供实时查询） |
-| **交通占用** | `InMemoryTrafficRegistry` | 段+点+驻留占用（任务原子占用/渐进释放/驻留障碍），**调度核心，重启清零重建** |
+| **交通占用** | `PersistentTrafficRegistry` | 内存互斥与数据库正本同步更新；重启恢复点段、驻留和停止保留，不清零 |
 | 等待意图 | `WaitIntentRegistry` | 占用冲突登记（死锁检测输入，2 分钟过期） |
-| 任务执行队列 | `TaskExecutionEngine` | 排队/执行中任务 + per-robot 信号量（重启后未终态任务重新入队） |
+| 任务执行队列 | `TaskExecutionEngine` | 排队/执行中任务 + per-robot 信号量（重启后未终态任务按中断失败收口，不自动重放；执行标记及资源另行停止对账） |
 | 导航图 | `NavigationGraph` | 地图激活时构建（JGraphT），volatile 原子替换 |
 | 自动分配等待队列 | pendingAssignments | 无机器人可用时的任务（60s 超时） |
 | 返充在途标记 | LowBatteryChargeSupervisor | 防重复返充 |
 
-**为什么内存态**：交通占用和机器人状态是高频读写（1Hz×N 台 + 任务事件），内存操作微秒级；PG 只存需要持久化和审计的数据。单实例架构下这是最优解。
+**读写边界**：实时读取以内存镜像为主；使用权、外部作业、执行标记、交通占用和命令序号同步提交数据库以支持恢复。相同驻留帧不重复落库，真实数据库延迟和容量需单独验收。
 
 ## 三、Redis 现状（诚实说明）
 
-**当前状态：已配置连接（boot 依赖 + application.yml），但代码中零使用**（无 RedisTemplate/Redisson 调用）。单实例架构下所有运行态在进程内存，不需要 Redis。
+**当前状态：已配置连接（boot 依赖 + application.yml），但代码中零使用**（无 RedisTemplate/Redisson 调用）。控制互斥仍在单进程；数据库持久化解决恢复，不提供多活互斥。
 
 **多实例演进时的规划用途**（见 `docs/multi-instance-roadmap.md`）：
 
@@ -130,7 +130,7 @@
 ```
 任务下发 API ──→ t_task_record（published）
     ↓
-内核执行（内存：队列/交通/规划）
+内核执行（队列/规划在内存；使用权/交通正本先提交数据库）
     ↓ 事件
 TaskStateMirror ──双写──→ t_task_state（queued→underway 进度→终态+失败原因+质检结果）
     ↓
@@ -140,3 +140,9 @@ TaskStateMirror ──双写──→ t_task_state（queued→underway 进度→
     ↓
 地图上传/激活 ──→ t_map_metadata（json 正本）→ 内存 NavigationGraph
 ```
+
+## 运行正本新增表（V6/V7）
+
+`t_robot_runtime` 按机器人保存使用权、外部作业、路线预约、实际驻留、停止确认、地图版本、执行任务 ID 和命令序号。写入使用独立事务先提交，再确认内存状态；不自动过期，不随历史任务 GC 清空。
+
+数据库使用 TIMESTAMPTZ，接口继续使用 Unix 毫秒。新增迁移不改旧表；首次从纯内存版本升级需要停单和确认所有机器人停止。恢复机制与部署边界见 [runtime-recovery.md](runtime-recovery.md)。

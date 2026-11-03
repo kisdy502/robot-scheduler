@@ -69,6 +69,8 @@ public class RobotSnapshot {
 
     /** 是否可接受任务派发（下线/错误/暂停/未知模式/离图时为 false）。 */
     private boolean dispatchable;
+    /** 基础导航就绪状态，独立于任务流使用权；旧镜像为空时兼容 dispatchable。 */
+    private Boolean navigationReady;
 
     /** 状态更新时间（毫秒）。 */
     private long updatedAtMillis;

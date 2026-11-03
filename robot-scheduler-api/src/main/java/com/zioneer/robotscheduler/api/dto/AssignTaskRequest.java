@@ -17,7 +17,7 @@ public class AssignTaskRequest {
 
     @NotNull
     @Schema(description = "Taskflow id", requiredMode = Schema.RequiredMode.REQUIRED)
-    private Integer taskflowId;
+    private Long taskflowId;
 
     @Schema(description = "任务模板类型列表")
     private List<String> taskTemplateTypeList;

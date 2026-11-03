@@ -18,7 +18,7 @@ import java.util.Set;
  * 用法：任务开始前 {@link #tryAcquire} 原子占用整条路径，逐段通过后
  * {@link #releaseSegments} 渐进释放；正常到达接续驻留，异常由停止确认后释放多余预约。</p>
  *
- * <p>实现：单实例用 {@link InMemoryTrafficRegistry}；多实例演进见 docs/multi-instance-roadmap.md。</p>
+ * <p>实现：单实例正式装配用 {@link PersistentTrafficRegistry}，隔离测试可用 {@link InMemoryTrafficRegistry}；多实例演进见 docs/multi-instance-roadmap.md。</p>
  */
 public interface TrafficRegistry {
 
@@ -106,6 +106,10 @@ public interface TrafficRegistry {
 
     /** 各机器人占用明细（快照/审计）。 */
     Map<String, OccupiedResources> occupationSnapshot();
+
+    /** 驻留正本查询，持久化实现也必须向等待诊断和路径执行提供相同语义。 */
+    default String dwellOwner(String waypointId) { return null; }
+    default String dwellSegmentOwner(String segmentId) { return null; }
 
     /** 资源占用明细。 */
     record OccupiedResources(Set<String> segmentIds, Set<String> waypointIds, long acquiredAtMillis) {

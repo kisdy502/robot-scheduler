@@ -13,7 +13,7 @@ import org.springframework.stereotype.Component;
  *
  * <p>启动对账：重启后内核任务态全部丢失，DB 里遗留的非终态记录（underway/queued）
  * 会成为永久僵尸——任务列表挂"执行中"、取消接口永远 cancel_requested。
- * 启动时统一标记为 failed（中断收口），机器人侧残留任务由各机器人的对账链路自理。</p>
+ * 启动时统一标记为 failed（中断收口）；这不释放持久化交通正本，残留导航仍需停止和位置帧确认。</p>
  */
 @Slf4j
 @Component

@@ -1,5 +1,7 @@
 package com.zioneer.robotscheduler.core.dispatch;
 
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
+import com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry;
 import com.zioneer.robotscheduler.core.charger.InMemoryChargerPool;
 import com.zioneer.robotscheduler.core.event.SchedulerEventBus;
 import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
@@ -43,6 +45,7 @@ class RuntimeFacadeTest {
     private TaskStateMirror taskStateMirror;
     private FleetStateMirror fleetStateMirror;
     private DefaultSchedulerFacade facade;
+    private final TaskAssignmentRegistry assignmentRegistry = new TaskAssignmentRegistry();
 
     @BeforeEach
     void setUp() {
@@ -50,8 +53,9 @@ class RuntimeFacadeTest {
         fleetStateMirror = new FleetStateMirror();
         MapManager mapManager = new MapManager(new MapMetadataParser(), mapArchiveRepository);
         facade = new DefaultSchedulerFacade(new InMemoryTaskRecordRepository(), new InMemoryChargerPool(),
-                taskStateMirror, fleetStateMirror, new TaskAssignmentRegistry(),
-                new SchedulerEventBus(publisher), mapManager, executionEngine);
+                taskStateMirror, fleetStateMirror, assignmentRegistry,
+                new SchedulerEventBus(publisher), mapManager, executionEngine, new RobotAvailabilityService(
+                        assignmentRegistry, new InMemoryTrafficRegistry()));
     }
 
     // ==================== runtime snapshot（旧 950/1021/1049/1074/1088） ====================

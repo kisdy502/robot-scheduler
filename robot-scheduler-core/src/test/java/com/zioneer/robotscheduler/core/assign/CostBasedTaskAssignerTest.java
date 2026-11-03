@@ -1,5 +1,8 @@
 package com.zioneer.robotscheduler.core.assign;
 
+import com.zioneer.robotscheduler.core.fleet.TaskAssignmentRegistry;
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
+import com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
 import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
@@ -28,6 +31,7 @@ import static org.mockito.Mockito.lenient;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class CostBasedTaskAssignerTest {
+    private final TaskAssignmentRegistry ownershipRegistry = new TaskAssignmentRegistry();
 
     private static final String MAP = """
             {
@@ -50,6 +54,21 @@ class CostBasedTaskAssignerTest {
     private FleetStateMirror mirror;
     private CostBasedTaskAssigner assigner;
 
+    // 已取得使用权的机器人仅允许持有者自动选中，外部作业期间连持有者也应跳过。
+    @Test
+    void claimedRobotIsOnlySelectableByItsOwnerEvenWhenGloballyUnavailable() {
+        var claimed = robot("R1", "fleet", 0, 80.0, "idle");
+        claimed.setNavigationReady(true);
+        claimed.setDispatchable(false);
+        mirror.upsert(claimed);
+        ownershipRegistry.assign("flow1", "R1");
+        var goal = new TaskGoal("go_to_place", null, "WP_B", null, null, java.util.Map.of());
+        assertThat(assigner.selectWithTrace(goal, null, null).selected()).isEmpty();
+        assertThat(assigner.selectWithTrace(goal, null, null, "flow1").selected()).isPresent();
+        ownershipRegistry.startOperation("flow1", "R1", "op");
+        assertThat(assigner.selectWithTrace(goal, null, null, "flow1").selected()).isEmpty();
+    }
+
     @BeforeEach
     void setUp() throws Exception {
         lenient().when(mapArchiveRepository.findActive()).thenReturn(java.util.Optional.empty());
@@ -58,7 +77,8 @@ class CostBasedTaskAssignerTest {
         MapManager mapManager = new MapManager(new MapMetadataParser(), mapArchiveRepository);
         mapManager.activateFromJson(MAP, null, null);
         mirror = new FleetStateMirror();
-        assigner = new CostBasedTaskAssigner(mirror, mapManager, new TaskAssignProperties());
+        assigner = new CostBasedTaskAssigner(mirror, mapManager, new TaskAssignProperties(),
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
     }
 
     private RobotSnapshot robot(String code, String fleet, double x, Double battery, String mode) {
@@ -182,7 +202,8 @@ class CostBasedTaskAssignerTest {
         props.setChargingInterruptPenaltySeconds(5);
         MapManager mapManager = new MapManager(new MapMetadataParser(), mapArchiveRepository);
         mapManager.activateFromJson(MAP, null, null);
-        assigner = new CostBasedTaskAssigner(mirror, mapManager, props);
+        assigner = new CostBasedTaskAssigner(mirror, mapManager, props,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
         mirror.upsert(robot("R_CHARGING_NEAR", "fleet_A", 9.5, 85.0, "charging"));
         mirror.upsert(robot("R_IDLE_FAR", "fleet_A", 0.5, 85.0, "idle"));
 

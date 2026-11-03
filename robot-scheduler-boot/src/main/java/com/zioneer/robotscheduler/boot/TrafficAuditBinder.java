@@ -20,6 +20,8 @@ public class TrafficAuditBinder {
     void bind() {
         if (trafficRegistry instanceof com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry inMemory) {
             inMemory.setEventSink(trafficEventSink);
+        } else if (trafficRegistry instanceof com.zioneer.robotscheduler.core.traffic.PersistentTrafficRegistry persistent) {
+            persistent.setEventSink(trafficEventSink);
         }
     }
 }

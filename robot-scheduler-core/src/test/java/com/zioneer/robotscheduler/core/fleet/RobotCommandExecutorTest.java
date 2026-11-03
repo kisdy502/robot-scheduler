@@ -37,6 +37,56 @@ class RobotCommandExecutorTest {
 
     private RobotCommandExecutor executor;
 
+    // 回执先于下发 HTTP 响应到达时，也必须匹配成功，不能留下永久等待的命令。
+    @Test
+    void completionBeforeDeliveryReturns_isNotLost() {
+        when(gateway.navigate(anyString(), anyInt(), anyString(), anyDouble(), anyDouble(), anyDouble(),
+                any(), any())).thenAnswer(call -> {
+                    executor.onCompletedCommands("R001", List.of(Map.of(
+                            "cmd_id", call.getArgument(1), "status", "COMPLETED")));
+                    return RobotCmdResult.SUCCESS;
+                });
+        var handle = executor.submitNavigation("R001", "F1", 1, 2, 0, null, Map.of());
+        assertThat(handle.future().join().completed()).isTrue();
+        assertThat(executor.hasPending("R001")).isFalse();
+    }
+
+    // 中间状态不能被当成失败并确认消费，后续终态仍应正常完成同一命令。
+    @Test
+    void intermediateReceipt_doesNotFinishOrAckCommand() {
+        var handle = executor.submitNavigation("R001", "F1", 1, 2, 0, null, Map.of());
+        assertThat(executor.onCompletedCommands("R001", List.of(Map.of(
+                "cmd_id", handle.cmdId(), "status", "RUNNING", "id", "intermediate")))).isFalse();
+        assertThat(handle.future().isDone()).isFalse();
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.never()).ackCompletion(anyString(), anyString());
+        executor.onCompletedCommands("R001", List.of(Map.of("cmd_id", handle.cmdId(), "status", "COMPLETED")));
+        assertThat(handle.future().join().completed()).isTrue();
+    }
+
+    // ack 抛异常不能抹掉已经确认的执行结果，也不能让状态轮询因该车中断。
+    @Test
+    void ackFailure_keepsMatchedCommandResult() {
+        var handle = executor.submitNavigation("R001", "F1", 1, 2, 0, null, Map.of());
+        when(gateway.ackCompletion("R001", "receipt")).thenThrow(new IllegalStateException("ack unavailable"));
+        assertThat(executor.onCompletedCommands("R001", List.of(Map.of(
+                "cmd_id", handle.cmdId(), "status", "COMPLETED", "id", "receipt")))).isTrue();
+        assertThat(handle.future().join().completed()).isTrue();
+        assertThat(executor.hasPending("R001")).isFalse();
+    }
+
+    // 同一机器人仍有待回执命令时，第二次下发应拒绝，不能覆盖第一条命令的等待状态。
+    @Test
+    void pendingCommand_cannotBeOverwrittenByAnotherSubmission() {
+        var first = executor.submitNavigation("R001", "F1", 1, 2, 0, null, Map.of());
+        var second = executor.submitNavigation("R001", "F1", 3, 4, 0, null, Map.of());
+        assertThat(second.future().join().completed()).isFalse();
+        assertThat(first.future().isDone()).isFalse();
+        executor.onCompletedCommands("R001", List.of(Map.of("cmd_id", first.cmdId(), "status", "COMPLETED")));
+        assertThat(first.future().join().completed()).isTrue();
+        org.mockito.Mockito.verify(gateway, org.mockito.Mockito.times(1)).navigate(anyString(), anyInt(),
+                anyString(), anyDouble(), anyDouble(), anyDouble(), any(), any());
+    }
+
     @BeforeEach
     void setUp() {
         executor = new RobotCommandExecutor(gateway);

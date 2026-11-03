@@ -4,7 +4,9 @@ import com.zioneer.robotscheduler.core.charger.LowBatteryChargeSupervisor;
 import com.zioneer.robotscheduler.core.assign.TaskAssignProperties;
 import com.zioneer.robotscheduler.core.event.SchedulerEventBus;
 import com.zioneer.robotscheduler.core.fleet.FleetPollingProperties;
-import com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry;
+import com.zioneer.robotscheduler.core.traffic.PersistentTrafficRegistry;
+import com.zioneer.robotscheduler.core.repository.RobotRuntimeRepository;
+import com.zioneer.robotscheduler.core.map.MapManager;
 import com.zioneer.robotscheduler.core.traffic.TrafficRegistry;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -28,8 +30,9 @@ public class SchedulerCoreAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean(TrafficRegistry.class)
-    public TrafficRegistry trafficRegistry() {
-        // 多实例部署时由 Redis 实现覆盖（方案 §3.3）
-        return new InMemoryTrafficRegistry();
+    public TrafficRegistry trafficRegistry(
+            RobotRuntimeRepository repository,
+            MapManager maps) {
+        return new PersistentTrafficRegistry(repository, maps);
     }
 }

@@ -1,5 +1,6 @@
 package com.zioneer.robotscheduler.boot;
 
+import com.zioneer.robotscheduler.core.fleet.TaskAssignmentRegistry;
 import com.zioneer.robotscheduler.core.map.MapManager;
 import com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry;
 import com.zioneer.robotscheduler.core.traffic.TrafficRegistry;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class MapSwitchRuntimeCleaner {
 
+    private final TaskAssignmentRegistry assignmentRegistry;
     private final MapManager mapManager;
     private final TrafficRegistry trafficRegistry;
     private final WaitIntentRegistry waitIntentRegistry;
@@ -25,7 +27,7 @@ public class MapSwitchRuntimeCleaner {
 
     @PostConstruct
     void register() {
-        mapManager.setActivationBlocked(() -> !trafficRegistry.occupationSnapshot().isEmpty());
+        mapManager.setActivationBlocked(() -> assignmentRegistry.hasExternalOperations() || !trafficRegistry.occupationSnapshot().isEmpty());
         mapManager.setOnActivated(() -> {
             waitIntentRegistry.clearAll();
             routeRegistry.clearAll();

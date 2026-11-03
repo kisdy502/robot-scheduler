@@ -1,5 +1,6 @@
 package com.zioneer.robotscheduler.core.assign;
 
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
 import com.zioneer.robotscheduler.common.scheduler.SchedulerConstants;
 import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
 import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
@@ -26,10 +27,13 @@ public class CostBasedTaskAssigner implements TaskAssigner {
     private final MapManager mapManager;
     private final TaskAssignProperties properties;
     private final ChargingInterruptionPolicy chargingPolicy;
+    private final RobotAvailabilityService availability;
 
     /** 单构造器（Spring 自动注入；策略对象由 properties 组装，测试可注入自定义参数）。 */
     public CostBasedTaskAssigner(FleetStateMirror fleetStateMirror, MapManager mapManager,
-                                 TaskAssignProperties properties) {
+                                 TaskAssignProperties properties,
+                                 RobotAvailabilityService availability) {
+        this.availability = availability;
         this.fleetStateMirror = fleetStateMirror;
         this.mapManager = mapManager;
         this.properties = properties;
@@ -55,12 +59,17 @@ public class CostBasedTaskAssigner implements TaskAssigner {
      */
     @Override
     public AssignmentDecision selectWithTrace(TaskGoal goal, String fleetName, String robotGroup) {
+        return selectWithTrace(goal, fleetName, robotGroup, null);
+    }
+
+    @Override
+    public AssignmentDecision selectWithTrace(TaskGoal goal, String fleetName, String robotGroup, String owner) {
         String fleetFilter = resolveFleetFilter(fleetName, robotGroup);
         record ScoredRobot(RobotSnapshot robot, double eta, double batteryPenalty, double busyPenalty,
                            double total) { }
         List<ScoredRobot> scored = fleetStateMirror.list().stream()
                 .filter(robot -> fleetFilter == null || fleetFilter.equals(robot.getFleetName()))
-                .filter(RobotSnapshot::isDispatchable)
+                .filter(robot -> availability.canAllocate(robot, owner))
                 .map(robot -> {
                     double eta = estimateEtaSeconds(robot, goal);
                     double batteryPenalty = batteryPenaltySeconds(robot);

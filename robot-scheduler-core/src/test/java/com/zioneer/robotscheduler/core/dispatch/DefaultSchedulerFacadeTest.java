@@ -1,5 +1,7 @@
 package com.zioneer.robotscheduler.core.dispatch;
 
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
+import com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry;
 import com.zioneer.robotscheduler.common.scheduler.task.DispatchStatus;
 import com.zioneer.robotscheduler.common.scheduler.task.TaskCategories;
 import com.zioneer.robotscheduler.core.charger.ChargerInfo;
@@ -54,6 +56,68 @@ class DefaultSchedulerFacadeTest {
     private TaskAssignmentRegistry assignmentRegistry;
     private DefaultSchedulerFacade facade;
 
+    // 网络重试复用同一业务任务 ID 时返回原请求，不能再次提交机器人移动。
+    @Test
+    void repeatedMoveRequest_reusesOriginalRequestAndSubmitsOnce() {
+        var first = facade.gotoPlace("1001", "2001", "R001", "W1", null, null, null, null, Map.of("idempotent", true));
+        var retry = facade.gotoPlace("1001", "2001", "R001", "W1", null, null, null, null, Map.of("idempotent", true));
+        assertThat(retry.get("scheduler_request_id")).isEqualTo(first.get("scheduler_request_id"));
+        org.mockito.Mockito.verify(executionEngine, org.mockito.Mockito.times(1))
+                .submit(any(), org.mockito.ArgumentMatchers.eq("R001"), any());
+    }
+
+    // 已有任务 ID 不能被换车或改目标复用，否则返回 409 且保留原记录。
+    @Test
+    void reusedTaskIdWithDifferentRequest_isConflict() {
+        facade.gotoPlace("1001", "2001", "R001", "W1", null, null, null, null, Map.of("idempotent", true));
+        assertThatThrownBy(() -> facade.gotoPlace("1001", "2001", "R002", "W1",
+                null, null, null, null, Map.of("idempotent", true)))
+                .isInstanceOf(SchedulerHttpException.class)
+                .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(409));
+        assertThat(repository.findByBusinessTaskId("2001").orElseThrow().getRobotCode()).isEqualTo("R001");
+    }
+
+    // 终态后的重发只能查询原结果，不能把已完成的移动重新执行一遍。
+    @Test
+    void completedRequestReplay_returnsCompletedWithoutResubmission() {
+        facade.gotoPlace("1001", "2001", "R001", "W1", null, null, null, null, Map.of("idempotent", true));
+        var record = repository.findByBusinessTaskId("2001").orElseThrow();
+        record.setRmfTaskId("move.done");
+        taskStateMirror.onTaskStateEvent(new TaskStateEvent("move.done", "completed", "go_to_place",
+                Map.of(), null, "fleet", "R001", 1L));
+        var retry = facade.gotoPlace("1001", "2001", "R001", "W1", null, null, null, null, Map.of("idempotent", true));
+        assertThat(retry).containsEntry("task_status", "completed").containsEntry("execution_final", true);
+        org.mockito.Mockito.verify(executionEngine, org.mockito.Mockito.times(1)).submit(any(), any(), any());
+    }
+
+    // 并发重试同一请求时，单实例原子准入只生成一个调度请求并下发一次。
+    @Test
+    void thirtyConcurrentRetries_admitOneTask() throws Exception {
+        try (var callers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            java.util.List<java.util.concurrent.Callable<String>> requests = java.util.stream.IntStream.range(0, 30)
+                    .mapToObj(i -> (java.util.concurrent.Callable<String>) () ->
+                            (String) facade.gotoPlace("1001", "2001", "R001", "W1", null,
+                                    null, null, null, Map.of("idempotent", true)).get("scheduler_request_id")).toList();
+            var replies = callers.invokeAll(requests, 10, java.util.concurrent.TimeUnit.SECONDS);
+            java.util.Set<String> ids = new java.util.HashSet<>();
+            for (var reply : replies) ids.add(reply.get());
+            assertThat(ids).hasSize(1);
+        }
+        org.mockito.Mockito.verify(executionEngine, org.mockito.Mockito.times(1)).submit(any(), any(), any());
+    }
+
+    // 内核受理异常必须收口为失败记录，相同请求重试不能返回永久等待或再次执行。
+    @Test
+    void admissionFailure_isRecordedAndReplayDoesNotResubmit() {
+        org.mockito.Mockito.doThrow(new IllegalStateException("executor closed"))
+                .when(executionEngine).submit(any(), any(), any());
+        assertThatThrownBy(() -> facade.gotoPlace("1001", "2001", "R001", "W1", null,
+                null, null, null, Map.of("idempotent", true))).isInstanceOf(IllegalStateException.class);
+        var replay = facade.gotoPlace("1001", "2001", "R001", "W1", null, null, null, null, Map.of("idempotent", true));
+        assertThat(replay).containsEntry("task_status", "failed").containsEntry("execution_final", true);
+        org.mockito.Mockito.verify(executionEngine, org.mockito.Mockito.times(1)).submit(any(), any(), any());
+    }
+
     private static final String TYPE_MAP = """
             {
               "versionInfo": {"version": "v1", "status": "published"},
@@ -69,6 +133,30 @@ class DefaultSchedulerFacadeTest {
             }
             """;
 
+    // 指定机器人已被其他任务流占用时返回 409，且不能先保存一条未实际受理的任务记录。
+    @Test
+    void specifiedDispatchRejectsForeignClaimBeforeSavingRecord() {
+        assignmentRegistry.assign("owner", "R001");
+        assertThatThrownBy(() -> facade.gotoPlace("other", "blocked", "R001", "inspection_start_1",
+                "default", null, null, null, Map.of()))
+                .isInstanceOf(SchedulerHttpException.class)
+                .satisfies(e -> assertThat(((SchedulerHttpException) e).getHttpStatus()).isEqualTo(409));
+        assertThat(repository.findByBusinessTaskId("blocked")).isEmpty();
+    }
+
+    // 外部作业通知返回毫秒时间，结束后查询应清除作业状态但保留任务流使用权。
+    @Test
+    void operationCallbacksKeepOwnershipAfterFinishAndExposeMillis() {
+        assignmentRegistry.assign("owner", "R001");
+        var started = facade.startExternalOperation("owner", "R001", "op");
+        assertThat(started.get("started_at")).isInstanceOf(Long.class);
+        assertThat(facade.robotUse("R001").get("external_operation")).isNotNull();
+        var finished = facade.finishExternalOperation("owner", "R001", "op");
+        assertThat(finished.get("finished_at")).isInstanceOf(Long.class);
+        assertThat(facade.robotUse("R001")).containsEntry("taskflow_id", "owner")
+                .containsEntry("external_operation", null);
+    }
+
     @BeforeEach
     void setUp() throws Exception {
         repository = new InMemoryTaskRecordRepository();
@@ -80,7 +168,8 @@ class DefaultSchedulerFacadeTest {
         mapManager.activateFromJson(TYPE_MAP, null, null);
         facade = new DefaultSchedulerFacade(repository, chargerPool, taskStateMirror,
                 fleetStateMirror, assignmentRegistry, new SchedulerEventBus(publisher), mapManager,
-                executionEngine);
+                executionEngine, new RobotAvailabilityService(
+                        assignmentRegistry, new InMemoryTrafficRegistry()));
     }
 
     // ==================== assign-task / release-robot（旧 2084/2093/1304/2102） ====================
@@ -119,7 +208,7 @@ class DefaultSchedulerFacadeTest {
     @Test
     void releaseRobot_withoutRobotCode_releasesTaskflowAssignments() {
         facade.assignTask("1001", null, "R001", null, null, "P001", null);
-        facade.assignTask("1001", null, "R002", null, null, "P002", null);
+        facade.assignTask("1001", null, "R001", null, null, "P001", null);
 
         Map<String, Object> data = facade.releaseRobot("1001", null);
 
@@ -627,7 +716,8 @@ class DefaultSchedulerFacadeTest {
         MapManager emptyManager = new MapManager(new MapMetadataParser(), mapArchiveRepository);
         DefaultSchedulerFacade bareFacade = new DefaultSchedulerFacade(repository, chargerPool, taskStateMirror,
                 fleetStateMirror, assignmentRegistry, new SchedulerEventBus(publisher), emptyManager,
-                executionEngine);
+                executionEngine, new RobotAvailabilityService(
+                        assignmentRegistry, new InMemoryTrafficRegistry()));
         Map<String, Object> data = bareFacade.sceneResourceStatus();
 
         assertThat(data).containsEntry("configured", false);

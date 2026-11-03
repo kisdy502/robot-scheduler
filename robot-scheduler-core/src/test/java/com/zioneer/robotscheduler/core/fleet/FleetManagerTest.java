@@ -26,6 +26,7 @@ import static org.mockito.Mockito.lenient;
  */
 @ExtendWith(MockitoExtension.class)
 class FleetManagerTest {
+    private final TaskAssignmentRegistry ownershipRegistry = new TaskAssignmentRegistry();
 
     /** 测试地图：A(0,0) 充电位、B(6,0) 取货位，双向路径。 */
     private static final String SIMPLE_MAP = """
@@ -79,7 +80,9 @@ class FleetManagerTest {
         fleetManager = new FleetManager(stateSource, mirror, taskStateMirror, mapManager,
                 trafficRegistry, new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(mapManager),
                 org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class),
-                properties, commandExecutor, chargerPoolMock);
+                properties, commandExecutor, chargerPoolMock,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()),
+                new ExternalActivityMirror());
         lenient().when(mapArchiveRepository.findByMapNameAndVersion(anyString(), anyString()))
                 .thenReturn(java.util.Optional.empty());
     }

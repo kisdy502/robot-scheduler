@@ -1,5 +1,8 @@
 package com.zioneer.robotscheduler.core.charger;
 
+import com.zioneer.robotscheduler.core.fleet.TaskAssignmentRegistry;
+import com.zioneer.robotscheduler.core.fleet.RobotAvailabilityService;
+import com.zioneer.robotscheduler.core.traffic.InMemoryTrafficRegistry;
 import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
 import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
 import com.zioneer.robotscheduler.core.task.TaskExecutionEngine;
@@ -29,6 +32,7 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class LowBatteryChargeSupervisorTest {
+    private final TaskAssignmentRegistry ownershipRegistry = new TaskAssignmentRegistry();
 
     @Mock
     private TaskExecutionEngine executionEngine;
@@ -37,6 +41,20 @@ class LowBatteryChargeSupervisorTest {
     private TaskStateMirror taskStateMirror;
     private InMemoryChargerPool chargerPool;
     private LowBatteryChargeSupervisor supervisor;
+
+    // 低电量机器人持有使用权或执行外部作业时不自动返充，结束作业并释放使用权后才恢复资格。
+    @Test
+    void claimedAndExternallyWorkingRobotNeverRetreatsAutomatically() {
+        var robot = robot("R1", 5.0, "idle");
+        ownershipRegistry.assign("flow1", "R1");
+        assertThat(supervisor.shouldRetreat(robot)).isFalse();
+        ownershipRegistry.startOperation("flow1", "R1", "op");
+        assertThat(supervisor.shouldRetreat(robot)).isFalse();
+        ownershipRegistry.finishOperation("flow1", "R1", "op");
+        assertThat(supervisor.shouldRetreat(robot)).isFalse();
+        ownershipRegistry.release("flow1", "R1");
+        assertThat(supervisor.shouldRetreat(robot)).isTrue();
+    }
 
     @BeforeEach
     void setUp() {
@@ -53,7 +71,8 @@ class LowBatteryChargeSupervisorTest {
                 executionEngine,
                 org.mockito.Mockito.mock(
                         com.zioneer.robotscheduler.core.repository.TaskRecordRepository.class),
-                properties);
+                properties,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
     }
 
     private RobotSnapshot robot(String code, Double battery, String mode) {
