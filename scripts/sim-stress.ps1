@@ -6,7 +6,9 @@
 param(
     [string]$LaneRobot = "",
     [int]$GapSeconds = 3,
-    [int]$MaxRounds = 100000
+    [int]$MaxRounds = 100000,
+    [int]$LowBatteryPercent = 20,
+    [int]$ResumeBatteryPercent = 50
 )
 
 $Scheduler = "http://127.0.0.1:8091"
@@ -155,6 +157,78 @@ function Wait-RobotReady([string]$Robot) {
     return $false
 }
 
+# 机器人快照（电量/mode/位置）；离线返回 null
+function Get-RobotState([string]$Robot) {
+    $j = Get-Json "$Scheduler/api/v1/runtime/fleets/snapshot"
+    $r = @($j.data.robots | Where-Object { $_.robot_code -eq $Robot })
+    if ($r.Count -eq 0) { return $null }
+    return $r[0]
+}
+
+# 最近充电位（按机器人当前位置欧氏距离）
+function Select-NearestCharger([object]$RobotState, [array]$Chargers) {
+    $best = $null
+    $bestD = [double]::MaxValue
+    foreach ($c in $Chargers) {
+        $dx = [double]$c.x - [double]$RobotState.pose.x
+        $dy = [double]$c.y - [double]$RobotState.pose.y
+        $d = [Math]::Sqrt($dx * $dx + $dy * $dy)
+        if ($d -lt $bestD) { $bestD = $d; $best = $c }
+    }
+    return $best
+}
+
+# 电量驱动回充：低电 → 移动到最近充电位 → 释放 → 等电量恢复 → RMS stop 取消充电 → 返回
+function Ensure-Charged([string]$Robot, [array]$Chargers) {
+    $state = Get-RobotState $Robot
+    if ($null -eq $state -or $null -eq $state.battery) { return }
+    if ([double]$state.battery -ge $LowBatteryPercent) { return }
+
+    $bat = [double]$state.battery
+    Write-Output ("[lane {0}] 低电回充: {1}% < {2}%，移动到最近充电位" -f $Robot, $bat, $LowBatteryPercent)
+    $charger = Select-NearestCharger $state $Chargers
+    if ($null -eq $charger) { Write-Output "[lane $Robot] 无充电位可用"; return }
+
+    # 抢占 + 移动到充电位（纯移动，本体到位自充）
+    $tf = New-TaskFlowId
+    $taskId = "$tf$(New-BizTs)"
+    $ab = ('{"taskflow_id":' + $tf + ',"task_template_type_list":["charge"],"robot_code":"' + $Robot + '"}')
+    $r = Post-Json "$Scheduler/api/v1/scheduler/assign-task" $ab
+    if (-not $r.ok) { Write-Output ("[lane $Robot] 回充抢占失败: " + (DetailOf $r.body $r.raw)); return }
+    $gb = ('{"taskflow_id":"' + $tf + '","task_id":"' + $taskId + '","robot_code":"' + $Robot + '","nav_target_point":"' + $charger.id + '"}')
+    $r = Post-Json "$Scheduler/api/v1/scheduler/goto-place" $gb
+    if ($r.ok) {
+        $null = Wait-MoveDone $taskId
+    }
+    $null = Release-WithRetry $tf $Robot
+    Append-Result $Robot "charge" $taskId "ok" "-" ("低电回充 {0}% -> {1}" -f $bat, $charger.id) 0
+
+    # 等电量恢复到作业阈值
+    Write-Output ("[lane {0}] 充电中，等待电量 >= {1}%" -f $Robot, $ResumeBatteryPercent)
+    while (-not (ShouldStop)) {
+        Start-Sleep -Seconds 30
+        $state = Get-RobotState $Robot
+        if ($null -eq $state -or $null -eq $state.battery) { continue }
+        if ([double]$state.battery -ge $ResumeBatteryPercent) { break }
+    }
+    if (ShouldStop) { return }
+
+    # 取消充电：充电中机器人不可派发，先 RMS stop 让本体退出充电态，再等可派
+    $state = Get-RobotState $Robot
+    if ($state.mode -eq "charging") {
+        Write-Output ("[lane {0}] 电量 {1}% >= {2}%，RMS stop 取消充电" -f $Robot, $state.battery, $ResumeBatteryPercent)
+        $sb = ('{"running_cmd_id":"0","stop_cmd_id":"' + (Get-Random -Maximum 100000) + '"}')
+        $null = Post-Json "$Rms/api/v1/robot-management/rmf/robots/$Robot/stop" $sb
+        $deadline = (Get-Date).AddSeconds(60)
+        while ((Get-Date) -lt $deadline -and -not (ShouldStop)) {
+            Start-Sleep -Seconds 3
+            $state = Get-RobotState $Robot
+            if ($null -ne $state -and $state.mode -ne "charging") { break }
+        }
+    }
+    Write-Output ("[lane {0}] 电量恢复 {1}%，继续作业" -f $Robot, (Get-RobotState $Robot).battery)
+}
+
 # ---------------- 车道模式 ----------------
 function Run-Lane([string]$Robot) {
     Write-Output ("[lane] robot={0} start" -f $Robot)
@@ -165,11 +239,14 @@ function Run-Lane([string]$Robot) {
 
     for ($i = 1; $i -le $MaxRounds; $i++) {
         if (ShouldStop) { break }
+        # 电量驱动：低电回充（到位自充 → ≥50% RMS stop 取消 → 恢复作业）
+        Ensure-Charged $Robot $wpCharge
+        if (ShouldStop) { break }
         if (-not (Wait-RobotReady $Robot)) { continue }
+        # 作业类型：移动/质检 各 50%（充电由电量驱动不再随机派）
         $dice = Get-Random -Maximum 10
         $type = "move"
-        if ($dice -gt 3 -and $dice -le 7) { $type = "qc" }
-        if ($dice -gt 7) { $type = "charge" }
+        if ($dice -gt 4) { $type = "qc" }
         $wp = $null
         if ($type -eq "move") { $wp = $wpAll | Get-Random }
         elseif ($type -eq "qc") { $wp = $wpWork | Get-Random }
