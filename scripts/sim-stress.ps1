@@ -8,7 +8,10 @@ param(
     [int]$GapSeconds = 3,
     [int]$MaxRounds = 100000,
     [int]$LowBatteryPercent = 20,
-    [int]$ResumeBatteryPercent = 50
+    [int]$ResumeBatteryPercent = 50,
+    [int]$MaxTotalTasks = 5000,
+    [int]$MaxRunHours = 12,
+    [int]$StatsIntervalMinutes = 30
 )
 
 $Scheduler = "http://127.0.0.1:8091"
@@ -259,6 +262,7 @@ function Run-Lane([string]$Robot) {
         $stage = "assign"
         $failReason = ""
         $assigned = $false
+        $skipAction = $false
 
         $assignBody = ('{"taskflow_id":' + $tf + ',"task_template_type_list":["quality_inspection"],"robot_code":"' + $Robot + '"}')
         $r = Post-Json "$Scheduler/api/v1/scheduler/assign-task" $assignBody
@@ -282,8 +286,17 @@ function Run-Lane([string]$Robot) {
             }
         }
 
-        if ($assigned -and $failReason -eq "" -and $type -ne "move") {
-            $stage = "action"
+            if ($assigned -and $failReason -eq "" -and $type -ne "move") {
+                # 轮中电量检查点：到位后动作前——电量已跌破阈值则跳过动作直接回充（动作耗时 5-10 分钟，等不起）
+                $midState = Get-RobotState $Robot
+                if ($null -ne $midState -and $null -ne $midState.battery -and [double]$midState.battery -lt $LowBatteryPercent) {
+                    $stage = "action"
+                    $failReason = ""
+                    $skipAction = $true
+                    Write-Output ("[lane {0}] 低电跳过动作: {1}% < {2}%，直接释放回充" -f $Robot, $midState.battery, $LowBatteryPercent)
+                }
+                if (-not $skipAction) {
+                $stage = "action"
             $activity = "quality_inspection"
             $template = $QcTemplate
             if ($type -eq "charge") { $activity = $ChargeTemplate; $template = $ChargeTemplate }
@@ -301,7 +314,8 @@ function Run-Lane([string]$Robot) {
                 $a = Wait-ActionDone $Robot $taskId
                 if (-not $a.ok) { $failReason = $a.reason }
             }
-        }
+                }
+            }
 
         if ($assigned) {
             $stage = "release"
@@ -314,13 +328,53 @@ function Run-Lane([string]$Robot) {
         $sw.Stop()
         $ok = ($failReason -eq "")
         $resTxt = "fail"; $stageTxt = $stage; $reasonTxt = $failReason
-        if ($ok) { $resTxt = "ok"; $stageTxt = "-"; $reasonTxt = "-" }
+        if ($skipAction) { $resTxt = "ok"; $stageTxt = "-"; $reasonTxt = "低电跳过动作（< $($LowBatteryPercent)%）" }
+        elseif ($ok) { $resTxt = "ok"; $stageTxt = "-"; $reasonTxt = "-" }
         Append-Result $Robot $type $taskId $resTxt $stageTxt $reasonTxt $sw.ElapsedMilliseconds
         Write-Output ("[lane {0}] #{1} {2} {3} -> {4} {5}ms {6}" -f $Robot, $i, $type, $wp.id,
             $resTxt.ToUpper(), $sw.ElapsedMilliseconds, $reasonTxt)
         Start-Sleep -Seconds $GapSeconds
     }
     Write-Output ("[lane] robot={0} exit" -f $Robot)
+}
+
+# ---------------- 统计（父进程周期输出 + 终局汇总共用） ----------------
+function Read-RoundRows() {
+    $rows = @()
+    foreach ($line in (Get-Content $ResultFile -Encoding UTF8)) {
+        if ($line.Trim()) { try { $rows += ($line | ConvertFrom-Json) } catch { } }
+    }
+    return $rows
+}
+
+function Write-Stats([string]$Tag) {
+    $rows = Read-RoundRows
+    $okRows = @($rows | Where-Object { $_.result -eq "ok" })
+    $failRows = @($rows | Where-Object { $_.result -eq "fail" })
+    $lines = @()
+    $lines += "==== SIM STRESS [$Tag] $(Get-Date -Format 'HH:mm:ss') ===="
+    $rate = 0
+    if ($rows.Count) { $rate = $okRows.Count / $rows.Count }
+    $lines += ("total: {0}  ok: {1}  fail: {2}  success rate: {3:P1}" -f $rows.Count, $okRows.Count, $failRows.Count, $rate)
+    foreach ($g in ($rows | Group-Object type)) {
+        $gok = @($g.Group | Where-Object { $_.result -eq "ok" }).Count
+        $trate = 0
+        if ($g.Count) { $trate = $gok / $g.Count }
+        $lines += ("  {0}: total={1} ok={2} rate={3:P0}" -f $g.Name, $g.Count, $gok, $trate)
+    }
+    if ($failRows.Count) {
+        $lines += "---- failure breakdown ----"
+        $failRows | Group-Object reason | Sort-Object Count -Descending | Select-Object -First 8 | ForEach-Object {
+            $lines += ("  [{0}] x{1}" -f $_.Name, $_.Count)
+        }
+    }
+    if ($okRows.Count) {
+        $avg = ($okRows | Measure-Object duration_ms -Average).Average
+        $lines += ("avg ok duration: {0:N0} ms" -f $avg)
+    }
+    $text = $lines -join "`n"
+    Write-Output $text
+    Add-Content -Path (Join-Path $PSScriptRoot "..\logs\sim-stress-stats.log") -Value $text -Encoding UTF8
 }
 
 # ---------------- 父模式 ----------------
@@ -337,39 +391,27 @@ function Run-Parent {
         $procs += Start-Process powershell -PassThru -WindowStyle Minimized -ArgumentList @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-LaneRobot", $code)
     }
-    Write-Output ("[stress] lanes started: {0}; stop file: {1}" -f $procs.Count, $StopFile)
-    Write-Output "[stress] waiting... (create stop file to finish)"
+    Write-Output ("[stress] lanes started: {0}; stop: {1} tasks / {2}h / stop file" -f $procs.Count, $MaxTotalTasks, $MaxRunHours)
+    $startTime = Get-Date
+    $lastStats = Get-Date
+    # 监控循环：5000 任务 / 12 小时 / stop 文件 → 自动停；每 30 分钟统计落盘
+    while (@($procs | Where-Object { -not $_.HasExited }).Count -gt 0) {
+        Start-Sleep -Seconds 60
+        if (((Get-Date) - $startTime).TotalHours -ge $MaxRunHours) {
+            Write-Output "[stress] reached ${MaxRunHours}h limit, stopping"; New-Item -ItemType File -Path $StopFile -Force | Out-Null
+        }
+        $rows = Read-RoundRows
+        if ($rows.Count -ge $MaxTotalTasks) {
+            Write-Output "[stress] reached ${MaxTotalTasks} tasks, stopping"; New-Item -ItemType File -Path $StopFile -Force | Out-Null
+        }
+        if (((Get-Date) - $lastStats).TotalMinutes -ge $StatsIntervalMinutes) {
+            $lastStats = Get-Date
+            Write-Stats "PERIODIC"
+        }
+    }
     foreach ($p in $procs) { Wait-Process -Id $p.Id -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 2
-
-    $rows = @()
-    foreach ($line in (Get-Content $ResultFile -Encoding UTF8)) {
-        if ($line.Trim()) {
-            try { $rows += ($line | ConvertFrom-Json) } catch { }
-        }
-    }
-    $okRows = @($rows | Where-Object { $_.result -eq "ok" })
-    $failRows = @($rows | Where-Object { $_.result -eq "fail" })
-    Write-Output "==== SIM STRESS SUMMARY ===="
-    $rate = 0
-    if ($rows.Count) { $rate = $okRows.Count / $rows.Count }
-    Write-Output ("total: {0}  ok: {1}  fail: {2}  success rate: {3:P1}" -f $rows.Count, $okRows.Count, $failRows.Count, $rate)
-    foreach ($g in ($rows | Group-Object type)) {
-        $gok = @($g.Group | Where-Object { $_.result -eq "ok" }).Count
-        $trate = 0
-        if ($g.Count) { $trate = $gok / $g.Count }
-        Write-Output ("  {0}: total={1} ok={2} rate={3:P0}" -f $g.Name, $g.Count, $gok, $trate)
-    }
-    if ($failRows.Count) {
-        Write-Output "---- failure breakdown ----"
-        $failRows | Group-Object stage, reason | Sort-Object Count -Descending | ForEach-Object {
-            Write-Output ("  [{0}] x{1}" -f $_.Name, $_.Count)
-        }
-    }
-    if ($okRows.Count) {
-        $avg = ($okRows | Measure-Object duration_ms -Average).Average
-        Write-Output ("avg ok duration: {0:N0} ms" -f $avg)
-    }
+    Write-Stats "FINAL"
     Write-Output ("detail log: {0}" -f $ResultFile)
 }
 
