@@ -133,7 +133,7 @@ class DbChargerPoolTest {
 
         pool.syncFromActiveMap();
 
-        verify(repository).deleteByChargerIdsNotIn(anyList());
+        verify(repository).disableByChargerIdsNotIn(anyList());
         // 失效桩被移除，地图上的充电位保留
         assertThat(pool.list(null)).hasSize(1);
         assertThat(pool.list(null).get(0).getChargerId()).isEqualTo("CHG_A");

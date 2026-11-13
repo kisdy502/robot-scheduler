@@ -38,6 +38,20 @@ public class SchedulerResourceController {
         return ApiEnvelope.ok(schedulerFacade.releaseRobot(request.getTaskflowId(), request.getRobotCode()));
     }
 
+    @Operation(summary = "使用权心跳（租约续期：长外部作业期间上层定期调用，防孤儿回收误杀）")
+    @PostMapping("/scheduler/robot-use/heartbeat")
+    public ApiEnvelope<Map<String, Object>> ownershipHeartbeat(
+            @RequestBody Map<String, String> request) {
+        return ApiEnvelope.ok(schedulerFacade.ownershipHeartbeat(request.get("taskflow_id")));
+    }
+
+    @Operation(summary = "强制释放机器人使用权（运维逃生门：有活动任务 409；审计事件 FORCE_RELEASED）")
+    @PostMapping("/scheduler/force-release-robot")
+    public ApiEnvelope<Map<String, Object>> forceReleaseRobot(
+            @Valid @RequestBody com.zioneer.robotscheduler.api.dto.ForceReleaseRobotRequest request) {
+        return ApiEnvelope.ok(schedulerFacade.forceReleaseRobot(request.getRobotCode(), request.getReason()));
+    }
+
     @Operation(summary = "分配充电桩")
     @PostMapping("/scheduler/assign-charger")
     public ApiEnvelope<Map<String, Object>> assignCharger(@Valid @RequestBody AssignChargerRequest request) {

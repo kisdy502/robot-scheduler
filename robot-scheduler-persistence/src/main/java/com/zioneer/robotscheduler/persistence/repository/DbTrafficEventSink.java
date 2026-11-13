@@ -29,6 +29,7 @@ public class DbTrafficEventSink implements TrafficEventSink {
         entity.setId(idGenerator.nextId());
         entity.setRobotCode(robotCode);
         entity.setAction(action);
+        // 整条路线保留完整资源列表，长度由 TEXT 列承载，不能截断影响排障。
         entity.setResourceId(resourceIds == null || resourceIds.isEmpty() ? null
                 : String.join(",", resourceIds));
         entity.setDetail(detail == null ? Map.of() : Map.of("message", detail));

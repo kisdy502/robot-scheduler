@@ -21,6 +21,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -69,13 +70,16 @@ public class TaskExecutionEngine {
     /** 段超时估算的保守速度（m/s，测试可注入放大以缩短超时）。 */
     double segmentConservativeSpeedMps = 0.2;
 
-    /** 到达位置偏差阈值（米）：超过视为地图疑似不一致（调度与机器人坐标系错位）。
-     *  容差需覆盖到位精度（真错位通常是数十米级整体漂移）。 */
-    double mapMismatchThresholdMeters = 3.0;
+    /** 实际到点位置误差上限为 20cm。 */
+    private static final double ARRIVAL_TOLERANCE_METERS = 0.2;
+    /** 途经点通过容差：中间点只需"大致通过"（交管释放由驻留 0.8m 逻辑兜底），真机停位精度 2-5 分米级。 */
+    private static final double WAYPOINT_PASS_TOLERANCE_METERS = 0.5;
+    /** 最终目标点容差：业务精度的最后一道闸（原 0.2 压线误杀 0.21-0.23m 的正常停位）。 */
+    private static final double FINAL_ARRIVAL_TOLERANCE_METERS = 0.3;
+    private static final long ARRIVAL_MAX_STATE_AGE_MILLIS = 8000;
 
-    /** 到达偏差复核次数：状态帧/位置上报滞后回执数秒（实测 6.6m ≈ 7s 滞后），单次采样会误杀
-     *  正常到达；超阈值后按间隔重采样，持续超阈才判定地图不一致。 */
-    int arrivalConfirmAttempts = 3;
+    /** 成功回执后等待位置确认，默认最多约 10 秒；期间不释放后续交通占用。 */
+    int arrivalConfirmAttempts = 11;
 
     /** 到达偏差复核采样间隔（毫秒，对齐状态轮询 1Hz；测试可注入缩短）。 */
     long arrivalConfirmIntervalMillis = 1000;
@@ -269,6 +273,14 @@ public class TaskExecutionEngine {
     public boolean cancel(String kernelTaskId, TaskRecord record, String robotCode, String reason) {
         KernelTaskState state = taskStates.get(kernelTaskId);
         if (state == null) {
+            // 区分两种 state==null：①正常终态已 retire（幂等返回，不触发孤儿止损）②调度重启丢失（真孤儿）。
+            // 不区分会把已终态任务误标"孤儿取消"——覆盖真实失败原因（如到点确认失败）并给空闲机器人重复发 stop。
+            Long retiredAt = retiredTerminalTasks.get(kernelTaskId);
+            if (retiredAt != null) {
+                log.info("任务已是终态（{} 前完成），取消请求幂等返回: task={}",
+                        java.time.Instant.ofEpochMilli(retiredAt), kernelTaskId);
+                return false;
+            }
             return cancelOrphan(kernelTaskId, record, robotCode, reason);
         }
         if (state.phase() == ExecutionPhase.DONE) {
@@ -343,8 +355,16 @@ public class TaskExecutionEngine {
         log.warn("保留交通占用，等待停止确认: robot={} reason={}", robotCode, reason);
     }
 
+    /** 已终态任务登记（内核态 retire 时间戳）：区分"正常终态清理"与"重启孤儿"，防取消误触发孤儿止损。 */
+    private final Map<String, Long> retiredTerminalTasks = new ConcurrentHashMap<>();
+
     private void retireTask(String kernelTaskId) {
         KernelTaskState removed = taskStates.remove(kernelTaskId);
+        retiredTerminalTasks.put(kernelTaskId, System.currentTimeMillis());
+        if (retiredTerminalTasks.size() > 4096) {
+            retiredTerminalTasks.entrySet().removeIf(e ->
+                    System.currentTimeMillis() - e.getValue() > 2 * 3600_000L);
+        }
         if (removed != null) {
             waitIntents.clear(removed.robotCode(), kernelTaskId);
             removed.retire();
@@ -492,6 +512,10 @@ public class TaskExecutionEngine {
                 routeRegistry.register(robotCode, kernelTaskId, resolveFloorId(state, goal),
                         lease.routeWaypointIds(), boundGraph(state).orElse(null));
                 state.setRouteWaypointIds(lease.routeWaypointIds());
+                log.info("导航路线规划完成: robot_code={} task={} route={}", robotCode, kernelTaskId,
+                        String.join(" -> ", lease.routeWaypointIds()));
+                publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                        "导航路线已规划", withAssignmentTrace(state, Map.of()));
                 boolean arrived = false;
                 try {
                     arrived = navigateBySegments(kernelTaskId, state, robotCode, goal, lease, target);
@@ -630,7 +654,7 @@ public class TaskExecutionEngine {
             double yawDelta = snapshot == null ? Double.POSITIVE_INFINITY
                     : Math.atan2(Math.sin(snapshot.getYaw() - target.getTheta()),
                             Math.cos(snapshot.getYaw() - target.getTheta()));
-            boolean alreadyAtPose = snapshot != null
+            boolean alreadyAtPose = validArrivalSnapshot(snapshot, 0)
                     && Math.hypot(snapshot.getX() - target.getX(), snapshot.getY() - target.getY())
                             < POSE_EQUALITY_EPSILON
                     && Math.abs(yawDelta) < POSE_EQUALITY_EPSILON;
@@ -672,6 +696,7 @@ public class TaskExecutionEngine {
                 return false;
             }
             state.navigationInFlight = true;
+            long commandIssuedAt = System.currentTimeMillis();
             RobotCommandExecutor.CommandHandle handle = commandExecutor.submitNavigation(
                     robotCode, floorId, waypoint.getX(), waypoint.getY(), waypoint.getTheta(),
                     speedLimit, description);
@@ -680,6 +705,7 @@ public class TaskExecutionEngine {
             // 本体忙拒绝恢复：stop 清除卡死的在途任务后重试一次（真机任务完成不自动关闭的场景）
             if (!result.completed() && isBodyBusyReject(result.detail())
                     && recoverFromBodyBusy(robotCode, "导航段 " + currentWaypoint + "->" + next, result.detail())) {
+                commandIssuedAt = System.currentTimeMillis();
                 handle = commandExecutor.submitNavigation(
                         robotCode, floorId, waypoint.getX(), waypoint.getY(), waypoint.getTheta(),
                         speedLimit, description);
@@ -712,16 +738,24 @@ public class TaskExecutionEngine {
             if (state.isCanceled()) {
                 return false;
             }
-            // 到达位置校验（地图不一致行为检测）：回执完成时机器人应位于本段目标点附近。
-            // 状态帧可能滞后回执数秒（实测偏差 6.6m = 位置帧落后 7s），单次采样会误杀正常到达，
-            // 超阈值后复核重采样；持续超阈 = 调度与机器人坐标系错位（如加载同名不同版地图）→ 止损
-            double deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next);
-            if (deviation > mapMismatchThresholdMeters) {
+            // 回执成功不代表实际到点：分级容差复核（途经 0.5m / 终点 0.3m），位置滞后时有限等待后再决定失败。
+            boolean finalLeg = i >= routeWaypoints.size() - 1;
+            double tolerance = finalLeg ? FINAL_ARRIVAL_TOLERANCE_METERS : WAYPOINT_PASS_TOLERANCE_METERS;
+            if (!withinTolerance(arrivalDeviation(robotCode, waypoint, commandIssuedAt), tolerance)) {
+                publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                        "导航回执成功，等待实际到点确认: " + next + String.format("（位置容差 %.2fm）", tolerance),
+                        withAssignmentTrace(state, Map.of()));
+            }
+            double deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next,
+                    commandIssuedAt, state, tolerance);
+            if (state.isCanceled()) return false;
+            if (!withinTolerance(deviation, tolerance)) {
                 String detail = String.format(
-                        "到达 %s 后上报位置持续偏差 %.1fm（目标 (%.1f,%.1f)，实际 (%.1f,%.1f)），疑似调度与机器人地图不一致，请检查机器人 SLAM 地图与调度激活地图（%s）",
-                        next, deviation, waypoint.getX(), waypoint.getY(), latestRobotX(robotCode), latestRobotY(robotCode),
+                        "回执成功但实际未到点 %s：偏差 %.3fm（容差 %.2fm，目标 (%.4f,%.4f)，实际 (%.4f,%.4f)）；位置缺失、过期或离线同样不能确认到点，绑定地图 %s",
+                        next, deviation, tolerance, waypoint.getX(), waypoint.getY(), latestRobotX(robotCode), latestRobotY(robotCode),
                         state.mapBinding.snapshot().map(MapSnapshot::metadata).map(m -> m.getMapName()).orElse("未知"));
-                eventMonitor.onMapSuspect(robotCode, detail);
+                log.warn("导航到点确认失败: task={} robot_code={} cmd_id={} target={} {}",
+                        kernelTaskId, robotCode, handle.cmdId(), next, detail);
                 retainAndStop(robotCode, "导航到达位置异常");
                 publishTerminal(kernelTaskId, state, "failed", "导航分段异常: " + detail);
                 return false;
@@ -865,23 +899,11 @@ public class TaskExecutionEngine {
                 .orElse(false);
     }
 
-    /** 机器人当前是否停在充电位上（驻留吸附 0.5m + type=charge 校验）。 */
+    /** 自充接管必须处于本任务指定充电点 20cm 内，不能通过拓扑吸附绕过到点核验。 */
     private boolean onChargeWaypoint(KernelTaskState state, String robotCode) {
-        var graph = boundGraph(state).orElse(null);
-        if (graph == null || !graph.isLoaded()) {
-            return false;
-        }
-        String floorId = resolveFloorId(state, state.goal());
-        var attachment = graph.attach(floorId, latestRobotX(robotCode), latestRobotY(robotCode),
-                com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.DWELL_WAYPOINT_THRESHOLD,
-                com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.DWELL_SEGMENT_THRESHOLD);
-        if (attachment.waypointId() == null) {
-            return false;
-        }
-        return graph.waypoint(floorId, attachment.waypointId())
-                .map(waypoint -> waypoint.getType()
-                        == com.zioneer.robotscheduler.core.map.WaypointType.CHARGE)
-                .orElse(false);
+        WaypointMetadata target = resolveWaypoint(state, state.goal());
+        return target != null && target.getType() == com.zioneer.robotscheduler.core.map.WaypointType.CHARGE
+                && withinArrivalTolerance(arrivalDeviation(robotCode, target, 0));
     }
 
     /**
@@ -1303,6 +1325,9 @@ public class TaskExecutionEngine {
         Map<String, Object> description = new HashMap<>(goal.parameters() == null
                 ? Map.of() : goal.parameters());
         description.put("rmf_task_id", kernelTaskId);
+        // 新版架构：移动命令剥离模板 code（真机对 description.task_template_code 强校验，
+        // 模板未下发会拒绝 navigate）；模板上下文由上层 start-activity 自带，与移动无关
+        description.remove("task_template_code");
         if (includeTemplateType) {
             description.put("task_template_type", goal.category());
         }
@@ -1328,11 +1353,18 @@ public class TaskExecutionEngine {
     }
 
     /**
-     * 到达偏差采样 + 复核：任一次采样回到阈值内即通过（位置帧滞后是暂态）；
-     * 全部采样都超阈才返回最终偏差（真错位是持续的）。取消等待期间不空转。
+     * 回执后核验实际位置，旧帧及无效帧不通过；超时则返回偏差，由调用方失败并保留占用。
      */
     private double confirmArrivalDeviation(String robotCode, WaypointMetadata waypoint,
-                                           String kernelTaskId, String waypointId) {
+                                           String kernelTaskId, String waypointId,
+                                           long commandIssuedAt, KernelTaskState state) {
+        return confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, waypointId,
+                commandIssuedAt, state, ARRIVAL_TOLERANCE_METERS);
+    }
+
+    private double confirmArrivalDeviation(String robotCode, WaypointMetadata waypoint,
+                                           String kernelTaskId, String waypointId,
+                                           long commandIssuedAt, KernelTaskState state, double tolerance) {
         double deviation = Double.MAX_VALUE;
         int attempts = Math.max(1, arrivalConfirmAttempts);
         for (int attempt = 1; attempt <= attempts; attempt++) {
@@ -1344,9 +1376,9 @@ public class TaskExecutionEngine {
                     break;
                 }
             }
-            deviation = Math.hypot(latestRobotX(robotCode) - waypoint.getX(),
-                    latestRobotY(robotCode) - waypoint.getY());
-            if (deviation <= mapMismatchThresholdMeters) {
+            if (state.isCanceled()) return Double.POSITIVE_INFINITY;
+            deviation = arrivalDeviation(robotCode, waypoint, commandIssuedAt);
+            if (withinTolerance(deviation, tolerance)) {
                 if (attempt > 1) {
                     log.info("到达位置复核通过: task={} robot={} waypoint={} 首次偏差超阈，第 {} 次采样 {}m（状态帧滞后回执）",
                             kernelTaskId, robotCode, waypointId, attempt, String.format("%.1f", deviation));
@@ -1355,6 +1387,33 @@ public class TaskExecutionEngine {
             }
         }
         return deviation;
+    }
+
+    /** 仅消除坐标减法的浮点舍入误差（纳米级），不放宽业务精度。 */
+    private boolean withinTolerance(double deviation, double tolerance) {
+        return Double.isFinite(deviation) && deviation <= tolerance + 1e-9;
+    }
+
+    @SuppressWarnings("unused")
+    private boolean withinArrivalTolerance(double deviation) {
+        return withinTolerance(deviation, ARRIVAL_TOLERANCE_METERS);
+    }
+
+    /** 只能用本次指令下发后接收到的在线有效位置确认到点；缺失位置不得默认为原点。 */
+    private double arrivalDeviation(String robotCode, WaypointMetadata waypoint, long commandIssuedAt) {
+        RobotSnapshot snapshot = fleetStateMirror.list().stream()
+                .filter(robot -> robotCode.equals(robot.getRobotCode())).findFirst().orElse(null);
+        if (!validArrivalSnapshot(snapshot, commandIssuedAt)) return Double.POSITIVE_INFINITY;
+        return Math.hypot(snapshot.getX() - waypoint.getX(), snapshot.getY() - waypoint.getY());
+    }
+
+    private boolean validArrivalSnapshot(RobotSnapshot snapshot, long commandIssuedAt) {
+        if (snapshot == null) return false;
+        long age = System.currentTimeMillis() - snapshot.getUpdatedAtMillis();
+        return snapshot.isOnline() && snapshot.isPositionValid() && !Boolean.TRUE.equals(snapshot.getRmsOffline())
+                && snapshot.getUpdatedAtMillis() >= commandIssuedAt
+                && age >= 0 && age <= ARRIVAL_MAX_STATE_AGE_MILLIS
+                && Double.isFinite(snapshot.getX()) && Double.isFinite(snapshot.getY());
     }
 
     private double latestRobotX(String robotCode) {
@@ -1369,14 +1428,14 @@ public class TaskExecutionEngine {
                 .findFirst().map(RobotSnapshot::getY).orElse(0.0);
     }
 
-    /** 事件明细合并分配评分（mirror/DB 只存最新事件，trace 需随每次发布携带）。 */
+    /** 最新事件会覆盖明细，分配评分与规划路线必须随进度一起携带。 */
     private Map<String, Object> withAssignmentTrace(KernelTaskState state, Map<String, Object> detail) {
         List<Map<String, Object>> trace = state == null ? null : state.assignmentTrace();
-        if (trace == null) {
-            return detail == null ? Map.of() : detail;
-        }
         Map<String, Object> merged = new HashMap<>(detail == null ? Map.of() : detail);
-        merged.put("assignment_trace", trace);
+        if (trace != null) merged.put("assignment_trace", trace);
+        if (state != null && state.routeWaypointIds() != null && !state.routeWaypointIds().isEmpty()) {
+            merged.put("route_waypoints", state.routeWaypointIds());
+        }
         return merged;
     }
 

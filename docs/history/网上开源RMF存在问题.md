@@ -1,3 +1,5 @@
+> **[历史归档 2026-11]** 早期网上开源 RMF 踩坑分析。深入的 rmf_traffic 源码考古与升级路线见 docs/rmf-traffic-analysis.md。
+
 # 网上开源 RMF 存在的问题（踩坑记录 → 本项目对策）
 
 > 来源：开源 RMF（rmf_core + fleet adapter + rmf-rest-api）生产/联调实践踩坑。

@@ -1,5 +1,9 @@
 # 机器人使用权与外部作业接入
 
+> **[历史归档 2026-11]** 本文描述的 external-operations start/finish 通知是旧接入模式（端点仍可用）。
+> 新版架构业务流：assign-task 抢占 → goto-place 移动 → **上层直连 RMS start-activity** → /observability/activities 读结果 → release-robot 释放。
+> 现行文档见 docs/api-guide.md 与 docs/acceptance-and-recovery.md。
+
 调度负责移动和交通资源；拍照、夹爪取放等动作由上层业务通过 RMS 执行。调度不自动识别这些作业，业务系统通过下面的通知维持机器人使用状态。
 
 ## 推荐调用顺序

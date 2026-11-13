@@ -18,6 +18,6 @@ public interface ChargerRecordRepository {
     /** 更新动态占用字段（status/occupied_by/reserved_by）。 */
     void updateOccupancy(ChargerInfo charger);
 
-    /** 对账删除：移除不在给定集合内的桩（地图点位已删除的）。 */
-    int deleteByChargerIdsNotIn(List<String> keepChargerIds);
+    /** 对账停用：不在给定集合内的桩置 enabled=false（不软删——软删行与新图重名桩撞物理唯一键）。 */
+    int disableByChargerIdsNotIn(List<String> keepChargerIds);
 }

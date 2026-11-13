@@ -21,6 +21,10 @@ public class RobotRuntimeEntity {
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String taskflowId;
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private Instant ownerSinceAt;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private Instant ownerHeartbeatAt;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String operationId;
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private Instant operationStartedAt;

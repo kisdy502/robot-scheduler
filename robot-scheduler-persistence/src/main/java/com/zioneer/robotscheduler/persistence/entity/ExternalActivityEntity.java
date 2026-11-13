@@ -37,6 +37,9 @@ public class ExternalActivityEntity {
     @TableField(value = "result_report", typeHandler = com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler.class)
     private Map<String, Object> resultReport;
 
+    @TableField("failure_msg")
+    private String failureMsg;
+
     @TableField("robot_reported_ms")
     private Long robotReportedMs;
 

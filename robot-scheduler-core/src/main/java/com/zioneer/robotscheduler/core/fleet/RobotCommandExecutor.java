@@ -182,6 +182,22 @@ public class RobotCommandExecutor {
         return pendingByRobot.containsKey(robotCode);
     }
 
+    /** 该机器人当前待回执命令的 cmdId（无待回执返回 null；供回执镜像区分内外部命令）。 */
+    public Integer pendingCmdId(String robotCode) {
+        PendingCommand pending = pendingByRobot.get(robotCode);
+        return pending == null ? null : pending.cmdId();
+    }
+
+    /** 兜底回执确认（外部动作镜像存档后清空 RMS 信箱；失败仅告警，下帧重试）。 */
+    public void ackReceipt(String robotCode, String completionId) {
+        try {
+            gateway.ackCompletion(robotCode, completionId);
+        } catch (RuntimeException failure) {
+            log.warn("外部回执兜底确认失败: robot_code={} completion_id={} error={}",
+                    robotCode, completionId, failure.getMessage());
+        }
+    }
+
     /** 抛弃机器人当前 pending 命令（超时/取消时调用，后续迟到回执不再匹配）。 */
     public void abandon(String robotCode, String reason) {
         PendingCommand pending = pendingByRobot.remove(robotCode);

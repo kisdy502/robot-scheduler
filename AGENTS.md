@@ -9,10 +9,11 @@
 
 ## 设计原则（重要）
 
-1. **自主设计，不照搬 RMF**：可借鉴 RMF 的调度思想（资源占用/集中分配），但数据模型、模块划分、坐标系、配置体系按本项目自己的设计。
-2. **SLAM 坐标系零转换**：地图 json、机器人上报坐标、目标点、区域多边形全部使用 SLAM map 坐标系（米制）；禁止引入任何坐标变换层。
-3. **单 json 地图元数据**：一个地图 = 一份元数据 json（详见《地图编辑json文件格式.md》）+ png + SLAM yaml 附件；旧栈 scene bundle（points/chargers/homes/...十几个配置）已废弃。
-4. **调度只发目标点**：路径规划仅用于 ETA 估算与交通占用管理；机器人导航由 RMS/机器人自主完成，速度/禁区约束随目标点参数下发。
+1. **调度只管移动（2026-11 版架构基线）**：一次任务 = 规划 → 导航到点 → 交通管制/占用 → 完成。**调度永不调用 RMS start-activity**；质检/充电启动/夹爪等业务动作由上层应用直连 RMS 下发，调度只做观测镜像（t_external_activity 存档 + 兜底 ack）。`goto-place` 是统一移动入口（String ID）；`dispatch_task` 已废弃保留兼容。任务 ID 契约：taskflow_id=雪花整数，task_id=taskflow_id+yyyyMMddHHmmssSSS。
+2. **自主设计，不照搬 RMF**：可借鉴 RMF 的调度思想（资源占用/集中分配），但数据模型、模块划分、坐标系、配置体系按本项目自己的设计。RMF 交管源码分析见 docs/rmf-traffic-analysis.md（参考库，非路线图）。
+3. **SLAM 坐标系零转换**：地图 json、机器人上报坐标、目标点、区域多边形全部使用 SLAM map 坐标系（米制）；禁止引入任何坐标变换层。
+4. **单 json 地图元数据**：一个地图 = 一份元数据 json（详见《地图编辑json文件格式.md》）+ png + SLAM yaml 附件；旧栈 scene bundle 已废弃。
+5. **调度只发目标点**：路径规划仅用于 ETA 估算与交通占用管理；机器人导航由 RMS/机器人自主完成，速度/禁区约束随目标点参数下发。navigate 描述只带对账字段（rmf_task_id/task_id/taskflow_id/nav_target_point），**禁止携带模板字段**（真机强校验会拒绝）。
 
 ## 模块结构
 

@@ -33,8 +33,35 @@ public class RobotAvailabilityService {
         }
     }
 
-    public void updateReadiness(RobotSnapshot robot, boolean ready) {
+    public void updateReadiness(RobotSnapshot robot, boolean ready, String blockedReason) {
         robot.setNavigationReady(ready);
-        robot.setDispatchable(ready && registry.canExecute(robot.getRobotCode(), null));
+        String owner = registry.ownerOf(robot.getRobotCode());
+        robot.setOwnedByTaskflow(owner);
+        robot.setOwnedSinceMillis(owner == null ? null : registry.ownerSince(owner));
+        boolean ownershipOk = registry.canExecute(robot.getRobotCode(), null);
+        robot.setDispatchable(ready && ownershipOk);
+        robot.setDispatchBlockedReason(!ready ? blockedReason
+                : ownershipOk ? null
+                : owner == null ? "使用权状态异常"
+                : "使用权被任务流 " + owner + " 占用（" + heldSeconds(robot) + "）");
+    }
+
+    private String heldSeconds(RobotSnapshot robot) {
+        if (robot.getOwnedSinceMillis() == null) {
+            return "未知时长";
+        }
+        long seconds = (System.currentTimeMillis() - robot.getOwnedSinceMillis()) / 1000;
+        if (seconds < 90) {
+            return seconds + " 秒";
+        }
+        if (seconds < 5400) {
+            return String.format("%.1f 分钟", seconds / 60.0);
+        }
+        return String.format("%.1f 小时", seconds / 3600.0);
+    }
+
+    /** 兼容旧调用（无原因）。 */
+    public void updateReadiness(RobotSnapshot robot, boolean ready) {
+        updateReadiness(robot, ready, ready ? null : "基础导航未就绪");
     }
 }

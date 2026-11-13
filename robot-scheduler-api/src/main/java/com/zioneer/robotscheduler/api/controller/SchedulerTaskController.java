@@ -46,12 +46,12 @@ public class SchedulerTaskController {
         return ApiEnvelope.ok(data);
     }
 
-    @Operation(summary = "点到点移动（发布后异步执行）")
+    @Operation(summary = "点到点移动（新版架构统一移动入口：规划/导航/交通管制/点位占用，到位即完成）")
     @PostMapping("/goto-place")
     public ApiEnvelope<Map<String, Object>> gotoPlace(@Valid @RequestBody GotoPlaceRequest request) {
         Map<String, Object> data = schedulerFacade.gotoPlace(
-                String.valueOf(request.getTaskflowId()),
-                String.valueOf(request.getTaskId()),
+                request.getTaskflowId(),
+                request.getTaskId(),
                 request.getRobotCode(),
                 request.getNavTargetPoint(),
                 request.getRobotGroup(),
@@ -62,7 +62,8 @@ public class SchedulerTaskController {
         return ApiEnvelope.published(data);
     }
 
-    @Operation(summary = "通用任务下发（推荐入口）")
+    @Operation(summary = "通用任务下发（已废弃：新版架构调度只管移动，统一走 goto-place；本端点保留旧上层应用兼容）")
+    @Deprecated
     @PostMapping("/dispatch_task")
     public ApiEnvelope<Map<String, Object>> dispatchTask(@Valid @RequestBody DispatchTaskRequest request) {
         Map<String, Object> data = schedulerFacade.dispatchTask(

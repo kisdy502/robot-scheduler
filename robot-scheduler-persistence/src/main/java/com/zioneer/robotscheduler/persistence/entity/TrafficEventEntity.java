@@ -27,6 +27,7 @@ public class TrafficEventEntity {
     @TableField("robot_code")
     private String robotCode;
 
+    /** 一次事件的完整资源 ID 列表（逗号拼接，数据库 TEXT），不是单个资源 ID。 */
     @TableField("resource_id")
     private String resourceId;
 

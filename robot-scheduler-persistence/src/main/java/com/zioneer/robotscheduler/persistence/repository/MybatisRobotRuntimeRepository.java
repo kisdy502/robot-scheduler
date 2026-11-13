@@ -54,7 +54,9 @@ public class MybatisRobotRuntimeRepository implements RobotRuntimeRepository {
                     row.getRobotCode(), row.getCompletedTaskflowId(), row.getCompletedOperationId(), "finished",
                     millis(row.getCompletedStartedAt()), millis(row.getCompletedFinishedAt()));
             return new RobotUsageSnapshot(row.getRobotCode(), row.getTaskflowId(), active, completed,
-                    row.getMapName(), row.getMapVersion());
+                    row.getMapName(), row.getMapVersion(),
+                    millis(row.getOwnerSinceAt()) == 0 ? null : millis(row.getOwnerSinceAt()),
+                    millis(row.getOwnerHeartbeatAt()) == 0 ? null : millis(row.getOwnerHeartbeatAt()));
         }).toList();
     }
 
@@ -67,6 +69,9 @@ public class MybatisRobotRuntimeRepository implements RobotRuntimeRepository {
         RobotRuntimeEntity row = existingOrNew(state.robotCode());
         boolean insert = row.getUpdatedAt() == null;
         row.setTaskflowId(state.taskflowId());
+        row.setOwnerSinceAt(state.ownerSinceMillis() == null ? null : Instant.ofEpochMilli(state.ownerSinceMillis()));
+        row.setOwnerHeartbeatAt(state.ownerHeartbeatMillis() == null ? null
+                : Instant.ofEpochMilli(state.ownerHeartbeatMillis()));
         OperationUse active = state.activeOperation();
         row.setOperationId(active == null ? null : active.operationId());
         row.setOperationStartedAt(active == null ? null : Instant.ofEpochMilli(active.startedAt()));

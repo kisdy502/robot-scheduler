@@ -171,6 +171,7 @@ public class ObservabilityController {
                     row.put("action_type", activity.getActionType());
                     row.put("action_status", activity.getActionStatus());
                     row.put("result_report", activity.getResultReport());
+                    row.put("failure_msg", activity.getFailureMessage());
                     row.put("robot_reported_ms", activity.getRobotReportedMillis());
                     row.put("created_at", activity.getCreatedAtMillis());
                     return row;

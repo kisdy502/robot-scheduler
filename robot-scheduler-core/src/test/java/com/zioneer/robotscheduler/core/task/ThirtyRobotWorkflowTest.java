@@ -81,6 +81,7 @@ class ThirtyRobotWorkflowTest {
                         snapshot.setX(x);
                         snapshot.setY(call.getArgument(4));
                         snapshot.setYaw(call.getArgument(5));
+                        snapshot.setUpdatedAtMillis(System.currentTimeMillis());
                         traffic.updateDwell(robot, (x == 5 ? "W" : "H") + index, null);
                         commands.onCompletedCommands(robot, List.of(Map.of(
                                 "cmd_id", call.getArgument(1), "status", "COMPLETED")));

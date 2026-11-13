@@ -46,6 +46,12 @@ public interface SchedulerFacade {
     /** POST /scheduler/release-robot：释放任务流占用的机器人。 */
     Map<String, Object> releaseRobot(String taskflowId, String robotCode);
 
+    /** POST /scheduler/robot-use/heartbeat：使用权心跳（租约续期，长外部作业期间上层必调）。 */
+    Map<String, Object> ownershipHeartbeat(String taskflowId);
+
+    /** POST /scheduler/force-release-robot：强制释放（运维逃生门，有活动任务 409）。 */
+    Map<String, Object> forceReleaseRobot(String robotCode, String reason);
+
     /** POST /scheduler/assign-charger：分配充电桩。 */
     Map<String, Object> assignCharger(String robotCode, java.util.List<String> chargerWaypointList,
                                       String resourceType);

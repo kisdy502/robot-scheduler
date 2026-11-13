@@ -229,7 +229,7 @@ public class FleetManager {
             // 外部任务保底：位置移动检测（上位机直发任务时 RMS 不回报执行状态，调度靠位移自保）
             boolean moving = updateMovingState(snapshot);
             snapshot.setMode(deriveMode(snapshot, moving));
-            availability.updateReadiness(snapshot, evaluateDispatchable(snapshot));
+            availability.updateReadiness(snapshot, evaluateDispatchable(snapshot), evaluateDispatchableReason(snapshot));
             fleetStateMirror.upsert(snapshot);
             // 地图一致性事件（变化检测在 monitor 内部去重）
             eventMonitor.onMapIdentity(snapshot.getRobotCode(), snapshot.getSlamMapCode(),
@@ -245,10 +245,16 @@ public class FleetManager {
             updateDwellState(snapshot, moving);
             // 充电桩基于位置自动释放：机器人离开充电位即释放（不依赖任务终态）
             releaseChargerIfDeparted(snapshot);
-            // 回执信箱：先镜像外部动作（观测档案，非调度命令），再走调度自身命令认领闭环
+            // 回执信箱：先镜像外部动作（观测档案），再走调度自身命令认领闭环；
+            // 镜像落档后兜底 ack 外部回执——上层应用可能中止/离场未读，不能让 RMS 信箱永久积压
             if (frame.getCompletedCommands() != null && !frame.getCompletedCommands().isEmpty()) {
-                externalActivityMirror.onReceipts(snapshot.getRobotCode(), frame.getCompletedCommands());
-                commandExecutor.onCompletedCommands(snapshot.getRobotCode(), frame.getCompletedCommands());
+                String robotCode = snapshot.getRobotCode();
+                Integer pendingCmdId = commandExecutor.pendingCmdId(robotCode);
+                for (String completionId : externalActivityMirror.onReceipts(robotCode,
+                        frame.getCompletedCommands(), pendingCmdId)) {
+                    commandExecutor.ackReceipt(robotCode, completionId);
+                }
+                commandExecutor.onCompletedCommands(robotCode, frame.getCompletedCommands());
             }
         }
     }
@@ -332,7 +338,7 @@ public class FleetManager {
     private void confirmStoppedFromFrame(RobotSnapshot snapshot) {
         String robot = snapshot.getRobotCode();
         var graph = mapManager.activeGraph().orElse(null);
-        if (!snapshot.isOnline() || isMapMismatch(snapshot) || graph == null || snapshot.getFloorId() == null
+        if (!snapshot.isOnline() || mapMismatched(snapshot) || graph == null || snapshot.getFloorId() == null
                 || commandExecutor.hasPending(robot) || !Double.isFinite(snapshot.getX())
                 || !Double.isFinite(snapshot.getY()) || !Double.isFinite(snapshot.getYaw())) {
             stopObservations.remove(robot);
@@ -372,7 +378,7 @@ public class FleetManager {
             stopObservations.remove(robot);
             nextStopRetryAt.remove(robot);
             syncChargerPoolFromDwell(robot, attachment.waypointId());
-            availability.updateReadiness(snapshot, evaluateDispatchable(snapshot));
+            availability.updateReadiness(snapshot, evaluateDispatchable(snapshot), evaluateDispatchableReason(snapshot));
             fleetStateMirror.upsert(snapshot);
             log.info("机器人停止已确认，剩余预约转为实际驻留: robot={} waypoint={} segment={}",
                     robot, attachment.waypointId(), attachment.segmentId());
@@ -534,38 +540,39 @@ public class FleetManager {
         return "idle";
     }
 
-    private boolean evaluateDispatchable(RobotSnapshot snapshot) {
-        if (trafficRegistry.isAwaitingStop(snapshot.getRobotCode()) || !snapshot.isOnline()) {
-            return false;
+    /** 可派判定：返回 null=可派；否则返回不可派原因（观测直出，排障不再猜）。 */
+    private String evaluateDispatchableReason(RobotSnapshot snapshot) {
+        if (!snapshot.isOnline()) {
+            return "机器人离线";
+        }
+        if (trafficRegistry.isAwaitingStop(snapshot.getRobotCode())) {
+            return "停止确认中，交通占用保留";
         }
         String mode = snapshot.getMode();
         if ("error".equals(mode) || "unknown".equals(mode) || "paused".equals(mode)
                 || "decommissioned".equals(mode)) {
-            return false;
+            return "状态异常: " + mode;
         }
         // 外部任务保底：位置在移动且无调度任务（上位机直发）→ 不可派发，防止冲突
         if (Boolean.TRUE.equals(movingFlags.getOrDefault(snapshot.getRobotCode(), Boolean.FALSE))
                 && !hasActiveScheduledTask(snapshot.getRobotCode())) {
-            return false;
+            return "位置移动中（外部任务保底判定）";
         }
         // 地图一致性校验（三方地图一致性·调度层）：机器人 SLAM 地图标识 ≠ 调度激活地图 → 禁止派发
         // （防名字对坐标错的隐蔽事故：同一物理世界不同版本地图，点位坐标错位导致乱走乱撞）
-        if (isMapMismatch(snapshot)) {
-            return false;
+        String slamMapCode = snapshot.getSlamMapCode();
+        if (slamMapCode != null && !slamMapCode.isBlank()) {
+            String activeMap = mapManager.activeMetadata()
+                    .map(com.zioneer.robotscheduler.core.map.MapMetadata::getMapName).orElse(null);
+            if (activeMap != null && !activeMap.equals(slamMapCode)) {
+                return "地图不一致: 机器人 " + slamMapCode + " vs 调度 " + activeMap;
+            }
         }
-        return isOnGraph(snapshot);
+        return offGraphReason(snapshot);
     }
 
-    /** 机器人 SLAM 地图与调度激活地图不一致（未上报标识的不判，兼容旧协议）。 */
-    private boolean isMapMismatch(RobotSnapshot snapshot) {
-        String slamMapCode = snapshot.getSlamMapCode();
-        if (slamMapCode == null || slamMapCode.isBlank()) {
-            return false;
-        }
-        String activeMap = mapManager.activeMetadata()
-                .map(com.zioneer.robotscheduler.core.map.MapMetadata::getMapName)
-                .orElse(null);
-        return activeMap != null && !activeMap.equals(slamMapCode);
+    private boolean evaluateDispatchable(RobotSnapshot snapshot) {
+        return evaluateDispatchableReason(snapshot) == null;
     }
 
     private boolean hasActiveScheduledTask(String robotCode) {
@@ -578,11 +585,24 @@ public class FleetManager {
         return false;
     }
 
-    private boolean isOnGraph(RobotSnapshot snapshot) {
+    /** 机器人 SLAM 地图与调度激活地图不一致（未上报标识的不判，兼容旧协议）。 */
+    private boolean mapMismatched(RobotSnapshot snapshot) {
+        String slamMapCode = snapshot.getSlamMapCode();
+        if (slamMapCode == null || slamMapCode.isBlank()) {
+            return false;
+        }
+        String activeMap = mapManager.activeMetadata()
+                .map(com.zioneer.robotscheduler.core.map.MapMetadata::getMapName)
+                .orElse(null);
+        return activeMap != null && !activeMap.equals(slamMapCode);
+    }
+
+    /** 离图判定：返回 null=在图上；否则返回原因（楼层不匹配/位置吸附失败）。 */
+    private String offGraphReason(RobotSnapshot snapshot) {
         var graph = mapManager.activeGraph().orElse(null);
         if (graph == null || !graph.isLoaded()) {
             // 地图未加载：不做离图判定（无图模式，仅告警一次）
-            return true;
+            return null;
         }
         String floorId = snapshot.getFloorId();
         String activeFloor = mapManager.activeFloorId().orElse(null);
@@ -590,7 +610,7 @@ public class FleetManager {
             String reason = "楼层不匹配: robotFloor=" + floorId + " activeFloor=" + activeFloor;
             warnOffGraph(snapshot, reason);
             eventMonitor.onGraphState(snapshot.getRobotCode(), false, reason);
-            return false;
+            return "离图（" + reason + "）";
         }
         GraphAttachment attachment = graph.attach(floorId, snapshot.getX(), snapshot.getY(),
                 SchedulerConstants.MAX_MERGE_WAYPOINT_DISTANCE, SchedulerConstants.MAX_MERGE_LANE_DISTANCE);
@@ -598,11 +618,15 @@ public class FleetManager {
             String reason = String.format("位置吸附失败: (%.2f, %.2f)", snapshot.getX(), snapshot.getY());
             warnOffGraph(snapshot, reason);
             eventMonitor.onGraphState(snapshot.getRobotCode(), false, reason);
-            return false;
+            return "离图（" + reason + "）";
         }
         offGraphWarnAt.remove(snapshot.getRobotCode());
         eventMonitor.onGraphState(snapshot.getRobotCode(), true, null);
-        return true;
+        return null;
+    }
+
+    private boolean isOnGraph(RobotSnapshot snapshot) {
+        return offGraphReason(snapshot) == null;
     }
 
     private void warnOffGraph(RobotSnapshot snapshot, String reason) {
@@ -638,6 +662,7 @@ public class FleetManager {
         existing.setX(frame.getX());
         existing.setY(frame.getY());
         existing.setYaw(frame.getYaw());
+        existing.setPositionValid(frame.isPositionValid());
         existing.setBattery(frame.getBattery());
         existing.setMap(frame.getMap());
         existing.setCompletedCommands(frame.getCompletedCommands());

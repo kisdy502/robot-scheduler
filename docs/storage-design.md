@@ -145,4 +145,18 @@ TaskStateMirror ──双写──→ t_task_state（queued→underway 进度→
 
 `t_robot_runtime` 按机器人保存使用权、外部作业、路线预约、实际驻留、停止确认、地图版本、执行任务 ID 和命令序号。写入使用独立事务先提交，再确认内存状态；不自动过期，不随历史任务 GC 清空。
 
-数据库使用 TIMESTAMPTZ，接口继续使用 Unix 毫秒。新增迁移不改旧表；首次从纯内存版本升级需要停单和确认所有机器人停止。恢复机制与部署边界见 [runtime-recovery.md](runtime-recovery.md)。
+## 观测新增表（V5/V8/V9/V10）
+
+### t_robot_event（V5）—— 机器人事件日志（K8s Events 风格）
+
+事件类型 MODE / BATTERY / ONLINE / **USAGE（OCCUPIED/RELEASED 占用时间线，前端业务流 🔒🔓 数据源）** / MAP（一致性）/ GRAPH（离图）；同因窗口内聚合 count++；保留 7 天小时级 GC。
+
+### t_external_activity（V8/V9）—— 外部动作回执镜像（新版架构核心观测）
+
+上层应用直连 RMS 的业务动作（质检/充电）回执存档：robot_code、body_task_id（=移动任务 task_id，聚合键）、rms_command_id（幂等去重）、action_type、action_status（3 成功/5 取消/6 失败）、result_report（业务结果 JSONB）、**failure_msg（V9，失败原因如"任务模板不存在"）**。调度镜像落档后兜底 ack 清 RMS 信箱。
+
+### t_traffic_event.resource_id（V10）
+
+`resource_id` 扩为 TEXT（一次事件完整资源列表逗号拼接，可超 128 字符）。
+
+数据库使用 TIMESTAMPTZ，接口继续使用 Unix 毫秒。新增迁移不改旧表；首次从纯内存版本升级需要停单和确认所有机器人停止。恢复机制与部署边界见 [acceptance-and-recovery.md](acceptance-and-recovery.md)。

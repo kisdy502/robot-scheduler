@@ -35,11 +35,11 @@ class MybatisRobotRuntimeRepositoryTest {
     @Test
     void usageTrafficAndReleasePreserveEachOthersColumns() {
         var active = new OperationUse("R1", "flow", "photo", "running", 100L, null);
-        repository.saveUsage(new RobotUsageSnapshot("R1", "flow", active, null, "map", "v1"));
+        repository.saveUsage(new RobotUsageSnapshot("R1", "flow", active, null, "map", "v1", 1000L, 1000L));
         repository.saveTraffic(new TrafficSnapshot("R1", Set.of("S"), Set.of("W"), "H", null,
                 false, false, 200L, "map", "v1"));
         var finished = new OperationUse("R1", "flow", "photo", "finished", 100L, 300L);
-        repository.saveUsage(new RobotUsageSnapshot("R1", null, null, finished, "map", "v1"));
+        repository.saveUsage(new RobotUsageSnapshot("R1", null, null, finished, "map", "v1", null, null));
         assertThat(repository.findUsages()).singleElement().satisfies(state -> {
             assertThat(state.taskflowId()).isNull();
             assertThat(state.activeOperation()).isNull();
@@ -57,7 +57,7 @@ class MybatisRobotRuntimeRepositoryTest {
     @Test
     void commandSequenceIsDurableAndNotResetByOtherWrites() {
         int first = repository.nextCommandId("R1");
-        repository.saveUsage(new RobotUsageSnapshot("R1", "flow", null, null, "map", "v1"));
+        repository.saveUsage(new RobotUsageSnapshot("R1", "flow", null, null, "map", "v1", 1000L, 1000L));
         repository.saveTraffic(new TrafficSnapshot("R1", Set.of(), Set.of(), "H", null,
                 false, false, 0, "map", "v1"));
         int next = new MybatisRobotRuntimeRepository(mapper).nextCommandId("R1");

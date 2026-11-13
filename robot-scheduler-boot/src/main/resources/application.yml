@@ -36,6 +36,10 @@ mybatis-plus:
 
 robot:
   scheduler:
+    ownership:
+      # 使用权租约（孤儿占用自动回收）：心跳超时 + 无活动任务 → 自动释放（USAGE/ORPHAN_RELEASED 审计）。
+      # 活跃业务流每 2 分钟内必有任务在跑或 API 活动（自动续约），不受影响；0 = 禁用自动回收
+      lease-timeout-seconds: ${OWNERSHIP_LEASE_TIMEOUT_SECONDS:120}
     fleet:
       state-interval-millis: ${FLEET_STATE_INTERVAL_MILLIS:1000}
       inventory-interval-millis: ${FLEET_INVENTORY_INTERVAL_MILLIS:10000}

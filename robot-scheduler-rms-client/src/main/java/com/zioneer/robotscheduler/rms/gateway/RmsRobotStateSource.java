@@ -152,6 +152,8 @@ public class RmsRobotStateSource implements RobotStateSource {
     private RobotSnapshot toSnapshot(RmsRobotStatus status) {
         RobotSnapshot snapshot = new RobotSnapshot();
         fillCommon(snapshot, status.getRobotCode(), status.getRobotName());
+        snapshot.setPositionValid(status.getX() != null && status.getY() != null
+                && Double.isFinite(status.getX()) && Double.isFinite(status.getY()));
         if (status.getX() != null) {
             snapshot.setX(status.getX());
         }

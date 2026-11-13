@@ -302,10 +302,14 @@ public class HttpRobotManagementClient implements RobotManagementClient {
                     .body(JsonNode.class);
             traceIn("POST /robots/" + robotCode + "/" + action + " 响应", root);
             JsonNode data = extractData(root);
-            // stop 的明确无活动任务响应是幂等成功；其他拒绝仍保留原有三态。
-            boolean noActiveTask = "stop".equals(action) && data != null
-                    && "NO_ACTIVE_TASK".equals(data.path("result_code").asText());
-            RmsCommandResult result = noActiveTask
+            // stop 的幂等成功语义（真机契约）：无活动任务（NO_ACTIVE_TASK）或本体任务已终态
+            // （BODY_STOP_TASK_REJECTED + already failed/finished/canceled——无可停之物，等价于已停止）；
+            // 若不识别会陷入 5s 重发 stop 死循环，交通占用永久保留、机器人不可派发。
+            boolean idempotentStop = "stop".equals(action) && data != null && ((
+                    "NO_ACTIVE_TASK".equals(data.path("result_code").asText()))
+                    || ("BODY_STOP_TASK_REJECTED".equals(data.path("result_code").asText())
+                        && data.path("reject_reason").asText().toLowerCase().contains("already")));
+            RmsCommandResult result = idempotentStop
                     ? RmsCommandResult.accepted(Map.of("no_active_task", true))
                     : toCommandResult(data, defaultRetriable);
             // 命令级访问日志（navigate/start-activity/stop/pause/resume/ack 低频，全量 INFO；

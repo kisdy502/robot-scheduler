@@ -78,10 +78,10 @@ public class DbChargerPool implements ChargerPoolPort {
             }
         }
         if (!keepIds.isEmpty()) {
-            int removed = repository.deleteByChargerIdsNotIn(keepIds);
+            int disabled = repository.disableByChargerIdsNotIn(keepIds);
             boolean memoryCleaned = chargersById.keySet().retainAll(keepIds);
-            if (removed > 0 || memoryCleaned) {
-                log.info("地图对账移除失效充电桩: dbRemoved={} memoryCleaned={}", removed, memoryCleaned);
+            if (disabled > 0 || memoryCleaned) {
+                log.info("地图对账停用失效充电桩: dbDisabled={} memoryCleaned={}", disabled, memoryCleaned);
             }
         }
     }

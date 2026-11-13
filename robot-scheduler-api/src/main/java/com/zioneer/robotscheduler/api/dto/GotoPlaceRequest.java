@@ -17,13 +17,13 @@ import java.util.Map;
 public class GotoPlaceRequest {
 
     @NotNull
-    @Schema(description = "Taskflow id", requiredMode = Schema.RequiredMode.REQUIRED)
-    private Long taskflowId;
+    @Schema(description = "Taskflow id（字符串形式，兼容旧整型 ID）", requiredMode = Schema.RequiredMode.REQUIRED)
+    private String taskflowId;
 
     @NotNull
-    @Schema(description = "业务任务 id；parameters.idempotent=true 时作为幂等键，重做需换新 id",
+    @Schema(description = "业务任务 id（字符串形式，兼容旧整型 ID；parameters.idempotent=true 时作为幂等键）",
             requiredMode = Schema.RequiredMode.REQUIRED)
-    private Long taskId;
+    private String taskId;
 
     @Schema(description = "机器人编码；为空时由调度内核自动分配")
     private String robotCode;

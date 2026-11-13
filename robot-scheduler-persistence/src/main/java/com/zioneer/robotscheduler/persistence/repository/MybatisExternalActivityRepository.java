@@ -38,6 +38,7 @@ public class MybatisExternalActivityRepository implements ExternalActivityReposi
         entity.setActionType(record.getActionType());
         entity.setActionStatus(record.getActionStatus());
         entity.setResultReport(record.getResultReport());
+        entity.setFailureMsg(record.getFailureMessage());
         entity.setRobotReportedMs(record.getRobotReportedMillis());
         Instant now = Instant.ofEpochMilli(record.getCreatedAtMillis() == null
                 ? System.currentTimeMillis() : record.getCreatedAtMillis());
@@ -79,6 +80,7 @@ public class MybatisExternalActivityRepository implements ExternalActivityReposi
         record.setActionType(entity.getActionType());
         record.setActionStatus(entity.getActionStatus());
         record.setResultReport(entity.getResultReport());
+        record.setFailureMessage(entity.getFailureMsg());
         record.setRobotReportedMillis(entity.getRobotReportedMs());
         record.setCreatedAtMillis(entity.getCreatedAt() == null ? null : entity.getCreatedAt().toEpochMilli());
         return record;

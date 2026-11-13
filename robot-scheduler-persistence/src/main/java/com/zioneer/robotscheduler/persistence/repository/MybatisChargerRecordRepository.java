@@ -46,7 +46,21 @@ public class MybatisChargerRecordRepository implements ChargerRecordRepository {
                 .eq(ChargerEntity::getChargerId, charger.getChargerId()));
         if (existing == null) {
             entity.setId(idGenerator.nextId());
-            mapper.insert(entity);
+            try {
+                mapper.insert(entity);
+            } catch (org.springframework.dao.DuplicateKeyException raced) {
+                // 并发对账或历史软删行撞物理唯一键：回查转更新（含软删行复活由 V11 迁移清障）
+                ChargerEntity winner = mapper.selectOne(new LambdaQueryWrapper<ChargerEntity>()
+                        .eq(ChargerEntity::getChargerId, charger.getChargerId()));
+                if (winner == null) {
+                    throw raced;
+                }
+                entity.setId(winner.getId());
+                entity.setStatus(winner.getStatus());
+                entity.setOccupiedBy(winner.getOccupiedBy());
+                entity.setReservedBy(winner.getReservedBy());
+                mapper.updateById(entity);
+            }
         } else {
             // 地图对账更新静态字段，保留动态占用（status/occupied_by/reserved_by）
             entity.setId(existing.getId());
@@ -55,6 +69,22 @@ public class MybatisChargerRecordRepository implements ChargerRecordRepository {
             entity.setReservedBy(existing.getReservedBy());
             mapper.updateById(entity);
         }
+    }
+
+    /** 停用不在当前地图的充电桩（代替软删除——软删行与新图重名桩撞物理唯一键，且无法复活）。 */
+    @Override
+    public int disableByChargerIdsNotIn(List<String> keepChargerIds) {
+        List<ChargerEntity> stale = mapper.selectList(new LambdaQueryWrapper<ChargerEntity>()
+                .notIn(ChargerEntity::getChargerId, keepChargerIds)
+                .eq(ChargerEntity::getEnabled, true));
+        for (ChargerEntity entity : stale) {
+            ChargerEntity patch = new ChargerEntity();
+            patch.setId(entity.getId());
+            patch.setEnabled(false);
+            patch.setUpdatedAt(Instant.now());
+            mapper.updateById(patch);
+        }
+        return stale.size();
     }
 
     @Override
@@ -73,13 +103,9 @@ public class MybatisChargerRecordRepository implements ChargerRecordRepository {
         mapper.updateById(patch);
     }
 
-    @Override
+    /** 兼容旧调用（已由 disableByChargerIdsNotIn 取代软删除语义）。 */
     public int deleteByChargerIdsNotIn(List<String> keepChargerIds) {
-        List<Long> toDelete = mapper.selectList(new LambdaQueryWrapper<ChargerEntity>()
-                        .notIn(ChargerEntity::getChargerId, keepChargerIds))
-                .stream().map(ChargerEntity::getId).toList();
-        toDelete.forEach(mapper::deleteById);
-        return toDelete.size();
+        return disableByChargerIdsNotIn(keepChargerIds);
     }
 
     private ChargerEntity toEntity(ChargerInfo charger) {

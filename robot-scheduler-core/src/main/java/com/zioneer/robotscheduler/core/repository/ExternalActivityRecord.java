@@ -34,6 +34,9 @@ public class ExternalActivityRecord {
     /** 业务结果原文（质检 NG/OK、检测项明细）。 */
     private Map<String, Object> resultReport;
 
+    /** 失败原因（action_status 非 3 时 raw_result.data.msg，如"任务模板不存在"）。 */
+    private String failureMessage;
+
     /** 机器人上报时间戳（毫秒）。 */
     private Long robotReportedMillis;
 

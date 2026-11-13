@@ -1,6 +1,23 @@
 # 调度系统架构总览
 
-> Java 21 + Spring Boot 3.3.5 ｜ 端口-适配器架构 ｜ 单进程内核（多实例演进方案见 multi-instance-roadmap.md）
+> Java 21 + Spring Boot 3.3.5 ｜ 端口-适配器架构 ｜ 单进程内核（多实例演进见 multi-instance-roadmap.md）
+
+## 〇、新版架构定调（2026-11-04 起）
+
+**调度只管移动。** 一次任务 = 规划路径 → 导航到点 → 交通管制/点位占用 → 完成。
+质检、充电启动、夹爪等业务动作（start-activity）由**上层应用直连 RMS 下发**，调度永不代发；
+调度对业务动作只做**观测镜像**（回执存档 + 兜底 ack），不编排不触发。
+
+| 触发入口 | 占用/释放 | 移动 | 业务动作 |
+|---|---|---|---|
+| 上层应用（前端模拟器 / 未来 taskflow 服务） | assign-task / release-robot | goto-place（统一入口） | 直连 RMS start-activity |
+| 地图页右键 | 同上（前端编排） | 同上 | 无 |
+| 低电自动回充（≤20%） | 调度内部 | 移动到充电位 | 无（本体自充） |
+
+**任务 ID 契约**（真机端要求）：`taskflow_id` = 数据库雪花 ID（assign-task 为 Long 整数）；
+`task_id` = `taskflow_id + yyyyMMddHHmmssSSS`（17 位时间后缀，直接反映发布先后顺序）。
+
+`dispatch_task` 已废弃（@Deprecated，端点保留兼容旧上层）；`goto-place` 的 taskflow_id/task_id 已放宽为 String（兼容旧整型 ID）。
 
 ## 一、模块总览
 
@@ -9,163 +26,139 @@ robot-scheduler/
 ├── robot-scheduler-common       基础协议（零 Spring 依赖）
 ├── robot-scheduler-core         调度内核（算法全部在此，禁止依赖 web/db）
 ├── robot-scheduler-rms-client   RMS 适配（实现 core 端口）
-├── robot-scheduler-persistence  持久化（实现 core 端口）
-├── robot-scheduler-api          REST 层（17 兼容端点 + 观测 + 地图管理）
+├── robot-scheduler-persistence  持久化（实现 core 端口，Flyway V1-V10）
+├── robot-scheduler-api          REST 层（兼容端点 + 观测 + 地图管理）
 └── robot-scheduler-boot         启动装配
 ```
 
-**依赖方向**：common ← core ← {rms-client / persistence / api} ← boot。core 只定义端口，实现在外围——换 RMS 协议或换存储不动内核。
+**依赖方向**：common ← core ← {rms-client / persistence / api} ← boot。core 只定义端口，实现在外围。
 
 | 模块 | 职责 | 核心类 |
 |---|---|---|
-| **common** | 统一响应 Result/ErrorCode(6xxxx)/分页 + 调度领域字典 | `SchedulerConstants`（旧栈常量对齐）、`TaskStatus`（状态归一化）、`TaskCategories`（类型归一化）、`RobotMode`（0-11 模式枚举） |
-| **rms-client** | RMS 8 端点 HTTP 客户端 + Mock | `HttpRobotManagementClient`（信封双兼容/三态映射）、`RmsRobotGateway`（命令适配）、`RmsRobotStateSource`（状态源适配） |
-| **persistence** | MyBatis-Plus 全 Lambda 零 XML + Flyway | `MybatisTaskRecordRepository`、`MybatisTaskStateRecordRepository`、`DbChargerPool`、`DbTrafficEventSink` |
-| **api** | Controller + 全局异常 + 观测台 | `SchedulerTaskController` 等 3 个兼容 Controller、`ObservabilityController`、`MapController`、`ApiExceptionHandler`（FastAPI detail 格式） |
+| **common** | Result/ErrorCode/分页 + 领域字典 | `SchedulerConstants`、`TaskStatus`、`TaskCategories`、`RobotMode` |
+| **rms-client** | RMS HTTP 客户端 + Mock | `HttpRobotManagementClient`（信封双兼容/三态映射/stop 幂等）、`RmsRobotGateway`、`RmsRobotStateSource` |
+| **persistence** | MyBatis-Plus 全 Lambda 零 XML + Flyway | 各 Repository 实现、`DbChargerPool`、`DbTrafficEventSink` |
+| **api** | Controller + 全局异常 + 观测 | `SchedulerTaskController`、`SchedulerResourceController`、`RuntimeController`、`RobotUseController`、`ObservabilityController`、`MapController` |
 | **boot** | 启动 + 装配 | `MapBootstrapRunner`、`TaskStatePersistenceBinder`、`TrafficAuditBinder`、`MapSwitchRuntimeCleaner` |
 
 ## 二、调度内核（core）—— 算法详解
 
 ### 2.1 map 包 —— 地图管理
 
-| 类 | 职责 | 关键方法 |
-|---|---|---|
-| `MapMetadataParser` | 单 json 元数据解析 + 结构校验（独立 ObjectMapper，防全局 snake_case 污染） | `parse(json)` → MapMetadata；校验 version/published/点位唯一/路径引用完整 |
-| `MapManager` | 地图生命周期：任务绑定与受控切换（单快照原子发布） | `activateFromJson`（上传激活+存档）、`loadFromArchive`（启动 DB 优先）、`activeGraph()`（获取运行图）、`activeFloorId()` |
-| `MapMetadata` 等 | 领域模型（严格对齐地图编辑器 json 契约） | 版本状态机（仅 published 可激活）、13 种点位类型、曲线段（贝塞尔）、区域约束 |
+| 类 | 职责 |
+|---|---|
+| `MapMetadataParser` | 单 json 元数据解析 + 结构校验（独立 ObjectMapper） |
+| `MapManager` | 地图生命周期：任务绑定与受控切换（单快照原子发布） |
 
-**使用**：`POST /api/v1/maps/upload` 上传 → 校验 published → 检查任务绑定与交通占用 → 构图与清理旧运行态 → 存档 → 原子发布新快照。冲突返回 HTTP 409 + Result（status=60409），不修改当前地图或存档。
-
-- `MapSnapshot` 一次绑定 mapName、version、generation、元数据、图、加载时间与附件路径；generation 仅为当前进程内的激活代次。
-- 门面在地图相关校验前获得短期绑定，提交到引擎后由任务绑定接续；自动返充同样保护选桩到提交的窗口。
-- 引擎在接纳时绑定地图，排队、自动分配等待、规划、分段导航、充电改派与结束停靠始终使用该版本。终态 detail.map_binding 记录地图名、版本和代次。
-- 任务状态移除不立即解除运行中绑定，必须等执行线程退出；排队取消、自动分配超时、提交异常会回收绑定。接纳与激活共用生命周期锁，避免检查后又进任务的竞态。
-- 保守切图策略：有绑定，或仍存在交通占用（包括驻留）时拒绝激活；不能通过切图清空在用资源。上传、本地文件、存档加载均受同一门禁约束。
-- 调度版本绑定不代表 RMS 已加载相同版本；当前南向协议缺少可核验的地图版本信息。失败/取消/失联后的占用保留与停止确认见下文交通生命周期。
+- 上传/激活门禁：有任务绑定或交通占用（含驻留）时拒绝切图（HTTP 409 + Result 60409）
+- 启动加载优先级：DB 激活版本 → 配置文件兜底；恢复占用所需地图版本不一致时**停止启动**（防换图后占用语义错乱）
+- 换图标准操作：换 local-map 配置后 `TRUNCATE t_robot_runtime` 清运行时登记再启动
 
 ### 2.2 routing 包 —— 路径规划
 
-| 类 | 职责 | 关键方法 |
-|---|---|---|
-| `NavigationGraph` | 楼层规划图（JGraphT Dijkstra） | `plan(floorId, from, to, speed, blockedSegments, blockedWaypoints)` → 最短路；`attach(floorId, x, y)` → 位置吸附（点 3m/段 1m）；`waypointByIdOrName`（id/name 双解析） |
-| `GeometryUtil` | 平面几何（自研零依赖） | `segmentIntersectsPolygon`（段-多边形相交，禁区判定）、`pointInPolygon`（射线法）、`pointToSegmentDistance`（段吸附垂距） |
-| `NavigationRoute` | 规划结果（途经点序列+段信息+ETA） | `Segment`（段 ID/长度/限速/避障标志） |
+| 类 | 职责 |
+|---|---|
+| `NavigationGraph` | 楼层规划图（JGraphT Dijkstra）：`plan(floorId, from, to, speed, blockedSegments, blockedWaypoints)`；`attach` 位置吸附（点 3m/段 1m） |
+| `GeometryUtil` | 平面几何：禁区判定/点在多边形/段吸附垂距 |
 
-**算法要点**：
-- 路径未设置限速时使用楼层默认速度，再与相交区域限速取最小值；查询时合并调度导航速度上限，搜索边权、ETA、规划结果段速度和 RMS `speed_limit` 使用同一有效速度
-- `robot.scheduler.assign.navigation-max-speed-mps`（默认 1.0，可通过 `SCHEDULER_NAVIGATION_MAX_SPEED_MPS` 覆盖）用于分配与执行；当前协议没有逐机速度能力字段，此配置是调度上限，不能替代硬件速度能力校验
-- 导航重试保留段限速，段超时预算同时考虑限速；楼层/路径速度必须有限且大于零，区域速度允许零表示禁行
-- 禁区（forbidden）相交的段**不建边**（剪枝而非过滤）；减速区合并限速
-- 贝塞尔曲线段按 16 段折线积分计长
-- 封锁段/点在**搜索前**从图排除（而非事后检查），保证绕行正确
-- 段 ID 无序点对格式 `PATH_x#{minId}-{maxId}`——双向路径对向互斥
+算法要点：限速取车道/区域/调度上限三者最小；禁区段不建边；贝塞尔 16 段折线积分；**封锁段/点在搜索前从图排除**（被占资源=墙，规划绕行）；段 ID 无序点对格式 `PATH_x#{min}-{max}`（双向对向互斥）。
 
-### 2.3 traffic 包 —— 交通管制（调度核心）
+> 已知局限（升级候选）：被占点是"墙"不是"红灯"——近路被占即绕远路，无等待代价权衡。见 rmf-traffic-analysis.md 第五节。
 
-| 类 | 职责 | 关键方法 |
-|---|---|---|
-| `TrafficRegistry` | 占用端口（段+点+驻留三级） | `tryAcquire(robot, segments, waypoints, lease)` 原子占用；`releaseSegments` 渐进释放；`updateDwell(robot, wpId, segId)` 驻留登记；`occupiedSegments/Waypoints` 规划障碍输入 |
-| `PersistentTrafficRegistry` | 单活正式实现，运行正本同步持久化 | 写入成功才确认申请/释放；重启保留原图资源并重新停止确认，详见 runtime-recovery.md |
-| `InMemoryTrafficRegistry` | 隔离测试实现及持久化实现的内存互斥内核 | 冲突判定含：任务占用互斥 + 驻留点/段互斥 + 对向段互斥（统一 ID 天然实现） |
-| `DeadlockMonitor` | 循环等待组检测（点/段依赖 + 强连通分量，5s 周期） | `detect()` → 循环等待组（告警级，不自动让路） |
-| `WaitIntentRegistry` | 等待意图登记（点/段 + 所属任务，规划失败/申请失败/段前复检均覆盖） | `record(robot, task, segments, waypoints)` / 持续刷新，退出等待按任务清理 |
+### 2.3 traffic 包 —— 交通管制
 
-**占用生命周期**：
+| 类 | 职责 |
+|---|---|
+| `TrafficRegistry` | 占用端口（活动租约段+点 / 驻留点 / 驻留段三级） |
+| `PersistentTrafficRegistry` | 单活正式实现，运行正本（t_robot_runtime）同步持久化 |
+| `DeadlockMonitor` | 循环等待组检测（强连通分量，5s 周期，告警级不自动解） |
+| `WaitIntentRegistry` | 等待意图登记（死锁检测输入） |
+| `ExternalActivityMirror` | **外部动作回执镜像**：RMS 信箱里非调度下发的回执 → t_external_activity 存档（含 failure_msg）→ 返回 ID 供 FleetManager 兜底 ack 清信箱 |
+
+**占用生命周期**（前锁后放）：
 ```
-任务受理 → tryAcquire 整条路径（全有或全无，冲突循环等待 300s）
-  → 逐段导航，每到达一个途经点 releaseSegments 释放身后段（渐进）
-  → 正常到达 releaseAllAndDwell 原子转为目标驻留
-  → 导航异常/取消/失联：保留剩余预约，stop 接受后连续 3 帧稳定位置确认，再转为实际驻留
-静止机器人 → FleetManager 每帧 updateDwell（吸附点+段），移动即清除
+任务受理 → tryAcquire 途经点全量持有 + 段租约（防他人把途经点当目标）
+  → 逐段导航，每到达一个途经点 releaseBehind 释放身后（渐进）
+  → 段入口 awaitSegmentEntryClear 复检（防等待期被驻留抢占）
+  → 正常到达 releaseAllAndDwell 原子转目标驻留（消灭释放/驻留间幽灵窗口）
+  → 异常/取消/失联：保留占用，stop 幂等确认后转实际驻留
+静止机器人 → FleetManager 每帧 updateDwell（吸附点 0.8m/段），移动即清除
 ```
 
-**常见异常处理**：导航未确认完成、执行中取消或机器人失联时，冻结剩余路线预约与最后驻留，停止确认期间不可接收新导航，也不能切图。在线状态帧确认停止后，原子改为实际所在点/段驻留，再释放多余预约。停止请求失败时按 5 秒间隔重试；不因等待时间到期自动释放交通占用。
+**stop 幂等语义**：`NO_ACTIVE_TASK` 与 `BODY_STOP_TASK_REJECTED + already failed/finished`（本体任务已终态，无可停之物）均归一为幂等成功——否则会陷入 5s 重发死循环、交通占用永久保留（2026-11-03 真机事故修复）。
 
-停止确认采用固定的轻量规则：stop 请求已接受（或 RMS 明确返回 `NO_ACTIVE_TASK`）、无本地待回执命令、地图匹配且可吸附、连续 3 个在线状态帧位置在 5cm 内且朝向在 0.1rad 内。恢复后的首帧仅用于触发 stop，不计入确认。已知离线机器人占用的充电位也保留，恢复后按实际位置对账。此流程处理常见运行异常，不增加持久化异常状态机或强制解锁接口。
-
-**等待关系诊断**：动态占用过滤后无路时，额外计算一条忽略动态占用的静态候选路线，用于记录点/段阻塞，不申请也不下发该候选路线。静态图本身无路则立即报告拓扑/方向/禁区问题，不登记机器人等待关系。段前复检也持续登记等待资源，通行、取消、终态或超时退出时按任务 ID 清理。
-
-监控每轮使用当前占用快照，解析所有资源占用者（包括多个驻留者），排除自身，并用强连通分量识别循环等待组，避免原有 8 层深度限制和重复环。普通排队（例如 20 台机器人等待 9 个正在作业的机器人）不构成循环等待。静态候选路线只提供诊断依赖，存在多条替代路线时，循环等待告警不能视为“已经证明所有解法均不可能”；当前不自动释放资源或发送让路命令。
+详见 [traffic-control.md](traffic-control.md)。
 
 ### 2.4 task 包 —— 任务执行
 
-| 类 | 职责 | 关键方法 |
-|---|---|---|
-| `TaskExecutionEngine` | 内核执行引擎（虚拟线程/任务） | `submit(record, robot, goal)` 指定机器人执行；`submitForAutoAssign(record, goal, fleet, group)` 自动分配；`cancel(taskId, record, robot, reason)` 取消（fork 语义）；`retryPendingAssignments`（5s 周期分配重试） |
-| `TaskStateMirror` | 任务状态镜像（内存+落库双写） | `onTaskStateEvent`（事件驱动 upsert t_task_state）；`isStale`（10s TTL 判定）；`evictTerminalOlderThan`（GC） |
-| `TaskStateEvent` | 事件契约（旧 task_state_update 同构） | 携带 message（失败真实原因）+ schedulerRequestId（回填 rmf_task_id） |
-| `TaskGoal` | 执行目标（导航点+动作+参数） | 由 facade 按 task_template_type 构建 |
+| 类 | 职责 |
+|---|---|
+| `TaskExecutionEngine` | 内核执行引擎（虚拟线程）：submit/submitForAutoAssign/cancel；**分段导航 + 到位复核 + 交通闭环** |
+| `TaskStateMirror` | 任务状态镜像（内存+落库双写，10s TTL 判 stale） |
+| `TaskGoal` | 执行目标——**action 恒为 null（纯移动）**，旧动作执行代码保留但不可达 |
 
-**任务状态机**：queued → underway（分段进度事件）→ completed / failed / canceled
-- 取消 fork 语义：排队中 → canceled；执行中 → 机器人 stop + completed + cancellation 标记
-- 分段导航：按规划途经点逐段下发 navigate（对齐旧 RMF），每段独立超时（段长/保守速度+余量）
-- 失败原因全链路透传：回执 message → CommandResult.detail → 事件 message → 落库 → 接口
+**任务全链路**：
+```
+POST /goto-place → facade 校验占用归属+幂等 → 落库(t_task_record, published)
+  → engine.submit → queued → 就绪等待(30s) → underway
+  → NavigationGraph.plan（避开占用段/驻留点）
+  → tryAcquire 途经点全量持有（冲突 8s 间隔 TRAFFIC_WAIT 事件，300s 上限）
+  → 逐段 navigate（description 只带对账字段：rmf_task_id/task_id/taskflow_id/nav_target_point，
+    模板字段已剥离——真机对 description.task_template_code 强校验会拒绝 navigate）
+    每段：等回执（executor uid/cmd_id 匹配 + ack）→ confirmArrivalDeviation 到位复核（0.20m）
+  → releaseAllAndDwell 原子驻留 → completed
+```
+
+- 取消 fork 语义：排队 → canceled；执行中 → stop + completed + cancellation 标记
+- 失败原因全链路透传：回执 message → 事件 → 落库 → 接口
 
 ### 2.5 fleet 包 —— 机器人管理
 
-| 类 | 职责 | 关键方法 |
-|---|---|---|
-| `FleetManager` | 状态帧融合中心（1Hz 状态 + 0.1Hz 清单轮询） | `onStateTick`（融合+mode 推导+驻留登记+充电桩位置释放）；`updateMovingState`（外部任务保底：帧间位移>0.3m 判 busy）；`sweepStaleRobots`（15s 无帧下线）；`updateDwellState`（静止机器人障碍化） |
-| `RobotCommandExecutor` | 命令执行器（每机器人串行） | `submitNavigation/submitActivity`（重试 3 次退避 1s）；`onCompletedCommands`（回执匹配：uid/cmd_id 三级 + ack）；`abandon`（超时/取消防迟到回执误伤） |
-| `RobotGateway` | 命令端口（rms-client 实现） | navigate/stop/startActivity/pauseTask/resumeTask/ackCompletion |
-| `RobotStateSource` | 状态源端口（rms-client 实现） | fetchStates/fetchInventory |
-| `FleetStateMirror` | 机器人镜像 | `list/filter/dispatchable 判定` |
+| 类 | 职责 |
+|---|---|
+| `FleetManager` | 1Hz 状态帧 + 0.1Hz 清单轮询融合中心：驻留登记/充电桩位置释放/停止确认/回执信箱分发（先镜像后认领） |
+| `RobotCommandExecutor` | 每机器人串行命令执行器：重试 3 次退避；回执匹配 + ack；`pendingCmdId`（供镜像区分内外部命令——真机 uid 不回显 sched: 前缀） |
+| `TaskAssignmentRegistry` | 使用权登记（assign/release + USAGE 事件进 t_robot_event） |
+| `RobotEventMonitor` | 机器人事件日志（MODE/BATTERY/ONLINE/USAGE/MAP/GRAPH，K8s 式聚合，7 天 GC） |
 
-### 2.6 assign 包 —— 任务分配
+### 2.6 assign 包 —— 任务分配（自动分配场景）
 
-| 类 | 职责 | 算法 |
-|---|---|---|
-| `CostBasedTaskAssigner` | 集中分配（替代 RMF bidding） | 代价 = 规划 ETA + BatteryAware 电量惩罚（<30% 线性、<10% 二次加重）+ 忙碌惩罚（300s）；候选过滤：在线/可派/非忙/fleet 匹配 |
+`CostBasedTaskAssigner`：代价 = ETA + 电量惩罚 + 忙碌惩罚；`ChargingInterruptionPolicy` 决定充电机可否被打断（预计任务后电量 ≥ 返充线 30%+余量，打断代价 120s）。
+> 新版架构默认"机器人选定不分配"（上层编排），自动分配保留给无 robot_code 的 goto-place。
 
 ### 2.7 charger 包 —— 充电管理
 
-| 类 | 职责 |
-|---|---|
-| `LowBatteryChargeSupervisor` | 30s 扫描：idle 且电量≤20% → 自动生成 charge 任务（充电桩分配+destination 注入+防重入+终态/离位双重释放） |
-| `ChargerPoolPort` / `DbChargerPool` | 充电桩池（DB 正本+内存缓存）；地图 charge 点位 30s 对账 |
+`LowBatteryChargeSupervisor`：30s 扫描，idle 且电量≤20% → 自动生成 **charge 移动任务**（纯导航到桩，不发 start-activity；本体到位自充）。充电桩基于位置自动释放（离开即释放）。
 
 ### 2.8 dispatch 包 —— 门面与治理
 
-| 类 | 职责 |
-|---|---|
-| `SchedulerFacade` / `DefaultSchedulerFacade` | 17 兼容端点门面（envelope/detail/字段保留）+ 任务校验链（类型归一/end_action/时间/fleet 一致性/return_home） |
-| `RecordGcJob` | 60s 周期 GC：published 无回执 1800s 放弃归档；7200s 未更新归档；镜像成对清理 |
-| `SchedulerHttpException` | HTTP 语义异常（400/404/409/501 → FastAPI detail 格式） |
+`SchedulerFacade`：受理校验链（占用归属/幂等/时间/fleet 一致性）+ `buildGoal`（**恒纯移动，不构造 action，不注入模板字段**）。
+`RecordGcJob`：60s GC（published 1800s 放弃；7200s 未更新归档）。
 
-## 三、关键流程
+## 三、观测体系（新版架构的"业务可见性"）
 
-### 任务执行全链路
-```
-POST /dispatch_task → facade 校验+落库(t_task_record, published)
-  → engine.submit → queued 事件（异步，保持响应 published 语义）
-  → [指定 robot] 直接执行 / [自动] CostBasedTaskAssigner 选机（分配后立即置 running 防并发堆积）
-  → per-robot 信号量排队 → waitForRobotReady(30s) → underway 事件
-  → NavigationGraph.plan（避开占用段/驻留点）
-  → TrafficRegistry.tryAcquire 整路径（冲突循环等待 300s）
-  → 逐段 navigate（RobotCommandExecutor 重试+回执匹配）
-    每段完成：releaseSegments + underway 进度事件（导航进度 2/5：已到达 X）
-  → [有动作] submitActivity → 回执 receipt → completed 事件（含质检结果）
-  → releaseAll + t_task_state 落库（失败原因/质检结果可查）
-```
+调度不再执行业务动作，但**观测总线上的全部事实**：
 
-### 交通冲突处理矩阵
-见 `docs/conflict-scenarios.md`（12 场景全覆盖：任务占用/驻留点/驻留段/对向互斥/死锁环/禁区绕行）。
+| 数据源 | 表/接口 | 内容 |
+|---|---|---|
+| 移动任务 | t_task_record + t_task_state | 全链路受理/执行/失败原因 |
+| 占用/释放 | t_robot_event（USAGE/OCCUPIED/RELEASED） | 上层业务流的 🔒🔓 时间线 |
+| **外部动作镜像** | t_external_activity（V8/V9） | 上层直连 RMS 的质检/充电回执（result_report + failure_msg），按 body_task_id 与移动任务聚合 |
+| 交通审计 | t_traffic_event（V10 resource_id TEXT） | 段/点占用释放流水 |
+| 实时快照 | /runtime/fleets/snapshot、/observability/** | 前端观测台数据源 |
+
+前端任务历史页按 task_id 聚合三类记录展示完整业务流时间线（🔒抢占→🚗移动→🔬质检→🔓释放）。
 
 ## 四、扩展指南
 
 | 需求 | 改哪里 |
 |---|---|
-| 新任务类型 | `TaskCategories` 加常量 + `DefaultSchedulerFacade.buildGoal` 加 case + 引擎无需改（导航+动作组合自动执行） |
-| 换 RMS 协议 | rms-client 实现 `RobotGateway`/`RobotStateSource` 端口，core 不动 |
-| 换存储 | persistence 实现 Repository 端口，core 不动 |
-| 多实例部署 | 见 `docs/multi-instance-roadmap.md`（Redis 快照+选主+占用 Redis 化） |
-| 新地图 | 遵循《地图编辑json文件格式.md》，上传接口激活（热切换） |
+| 新业务动作（夹爪/拍照…） | **不改调度**——上层直连 RMS start-activity，镜像自动捕获回执 |
+| 换 RMS 协议 | rms-client 实现 RobotGateway/RobotStateSource 端口 |
+| 换存储 | persistence 实现 Repository 端口 |
+| 多实例部署 | 见 multi-instance-roadmap.md |
+| 交通升级（红灯规划/让路） | 见 rmf-traffic-analysis.md 第五节路线 |
 
-## 五、测试与文档索引
+## 五、测试
 
-| 文档 | 内容 |
-|---|---|
-| `docs/api-test-guide.md` | HTTP 接口测试手册（PowerShell 命令+多机 mock 接入） |
-| `docs/conflict-scenarios.md` | 冲突场景矩阵（场景/算法/代码位置/错误提示） |
-| `docs/multi-instance-roadmap.md` | 多实例演进方案 |
-| 测试 | 166 个：契约 20 + 引擎 13 + 命令 10 + 车队 16 + 分配 8 + 返充 7 + 死锁场景 13 + 地图/规划 22 + facade 60 + DB 6 |
+当前全量 **349 用例**（core 294 + api 8 + rms-client 14 + boot 27 + 其他 6），Mockito 隔离、不拉 Spring 上下文；关键回归：30 台工作流闭环、重启恢复、交通死锁场景、外部动作镜像。测试阅读工具见 unit-test-review.md。

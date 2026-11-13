@@ -72,12 +72,65 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
     public Map<String, Object> robotUse(String robot) {
         if (robot == null || robot.isBlank()) throw SchedulerHttpException.badRequest("robot_code is required");
         synchronized (assignmentRegistry) {
+            String owner = assignmentRegistry.ownerOf(robot);
+            if (owner != null) {
+                assignmentRegistry.touch(owner);
+            }
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("robot_code", robot);
-            data.put("taskflow_id", assignmentRegistry.ownerOf(robot));
+            data.put("taskflow_id", owner);
+            data.put("owned_since_ms", owner == null ? null : assignmentRegistry.ownerSince(owner));
+            data.put("owner_heartbeat_ms", owner == null ? null : assignmentRegistry.ownerHeartbeat(owner));
             var operation = assignmentRegistry.activeOperation(robot);
             data.put("external_operation", operation == null ? null : operationData(operation));
             data.put("available_for_new_taskflow", assignmentRegistry.canAllocate(robot, null));
+            return data;
+        }
+    }
+
+    /** 使用权心跳（租约续期）：上层业务流存续期间的显式活动信号（长外部作业期间必调）。 */
+    @Override
+    public Map<String, Object> ownershipHeartbeat(String taskflowId) {
+        if (taskflowId == null || taskflowId.isBlank()) {
+            throw SchedulerHttpException.badRequest("taskflow_id is required");
+        }
+        synchronized (assignmentRegistry) {
+            Long heartbeat = assignmentRegistry.ownerHeartbeat(taskflowId);
+            if (heartbeat == null) {
+                throw SchedulerHttpException.notFound("taskflow holds no robot: " + taskflowId);
+            }
+            assignmentRegistry.touch(taskflowId);
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("taskflow_id", taskflowId);
+            data.put("heartbeat_ms", System.currentTimeMillis());
+            return data;
+        }
+    }
+
+    /**
+     * 强制释放（运维逃生门）：有活动调度任务时 409 并附任务清单（先 stop 再来）；无任务直接放。
+     */
+    @Override
+    public Map<String, Object> forceReleaseRobot(String robotCode, String reason) {
+        if (robotCode == null || robotCode.isBlank()) throw SchedulerHttpException.badRequest("robot_code is required");
+        synchronized (assignmentRegistry) {
+            String owner = assignmentRegistry.ownerOf(robotCode);
+            if (owner == null) {
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("robot_code", robotCode);
+                data.put("released", false);
+                data.put("message", "机器人无使用权占用（无需释放）");
+                return data;
+            }
+            if (!assignmentRegistry.forceRelease(robotCode, reason)) {
+                throw SchedulerHttpException.conflict(
+                        "机器人存在未终态调度任务，请先 stop-task 后再强制释放: owner=" + owner);
+            }
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("robot_code", robotCode);
+            data.put("released", true);
+            data.put("taskflow_id", owner);
+            data.put("reason", reason);
             return data;
         }
     }
@@ -190,6 +243,10 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
             throw SchedulerHttpException.notFound("task status record not found");
         }
         TaskRecord taskRecord = record.get();
+        // 取消也是业务流活动 → 所有权心跳续期
+        if (taskRecord.getPayload() != null && taskRecord.getPayload().get("taskflow_id") != null) {
+            assignmentRegistry.touch(String.valueOf(taskRecord.getPayload().get("taskflow_id")));
+        }
         if (taskRecord.getRmfTaskId() == null) {
             throw SchedulerHttpException.conflict(
                     "task has not received an RMF task id yet and cannot be canceled");
@@ -539,6 +596,11 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
             row.put("online_status", online ? "online" : "offline");
             row.put("mode", robot.getMode());
             row.put("dispatchable", dispatchable);
+            // 不可派原因直出（null=可派）：使用权占用/停止确认/地图不一致/离图——排障不再靠猜
+            row.put("dispatch_blocked_reason", dispatchable ? null
+                    : online ? robot.getDispatchBlockedReason() : "机器人离线");
+            row.put("owned_by_taskflow", robot.getOwnedByTaskflow());
+            row.put("owned_since_ms", robot.getOwnedSinceMillis());
             row.put("decommissioned", Boolean.TRUE.equals(robot.getDecommissioned()));
             row.put("battery", robot.getBattery() == null ? null
                     : Math.round(robot.getBattery() * 10.0) / 10.0);
@@ -873,6 +935,8 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
             if (robotCode != null && !robotCode.isBlank()) {
                 assignmentRegistry.assertCanUse(robotCode, taskflowId);
             }
+            // 任务受理即所有权心跳（业务流有活动 → 租约续期）
+            assignmentRegistry.touch(taskflowId);
             TaskGoal goal = buildGoal(category, taskId, taskTemplateCode, navStartPoint, navEndPoint, taskflowId,
                     parameters, robotCode);
             record.setPayload(requestPayload);
@@ -910,11 +974,9 @@ public class DefaultSchedulerFacade implements SchedulerFacade {
         Map<String, Object> params = new java.util.HashMap<>(parameters == null ? Map.of() : parameters);
         // RMS 要求命令 description 携带 task_id（body_task_id），缺失会被拒绝
         params.putIfAbsent("task_id", businessTaskId);
-        // 顶层 task_template_code 注入透传（上层应用 start-activity 按模板 code 查模板，非固定类型）
-        if (taskTemplateCode != null && !taskTemplateCode.isBlank()) {
-            params.putIfAbsent("task_template_code", taskTemplateCode);
-        }
-        // 顶层 taskflow_id 注入透传（上层应用编排与回执关联用）
+        // 顶层 taskflow_id 注入透传（上层应用编排对账）；模板类字段不注入——
+        // 移动命令不带业务模板（真机强校验未下发模板会拒绝 navigate），模板由上层 start-activity 自带
+        params.remove("task_template_code");
         if (taskflowId != null && !taskflowId.isBlank()) {
             params.putIfAbsent("taskflow_id", taskflowId);
         }

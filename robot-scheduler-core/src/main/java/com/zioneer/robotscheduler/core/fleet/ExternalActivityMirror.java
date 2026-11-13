@@ -35,29 +35,59 @@ public class ExternalActivityMirror {
 
     /**
      * 回执信箱镜像入口（FleetManager 每帧调用，先于调度自身命令认领）。
+     *
+     * @param pendingCmdId 调度当前待回执命令的 cmdId（无则 null）——真机回执不回显
+     *                     sched: 前缀 uid，需按 cmd_id 二次排除调度自身的命令
+     * @return 本帧中属于外部（上层应用）命令的回执 ID 列表（含已镜像过的重复投递），
+     *         供调用方兜底 ack 清空信箱——上层应用可能中止/离场未读，不能让信箱永久积压
      */
-    public void onReceipts(String robotCode, List<Map<String, Object>> completedCommands) {
+    public List<String> onReceipts(String robotCode, List<Map<String, Object>> completedCommands, Integer pendingCmdId) {
         if (robotCode == null || completedCommands == null || completedCommands.isEmpty()) {
-            return;
+            return List.of();
         }
+        List<String> externalIds = new java.util.ArrayList<>(completedCommands.size());
         for (Map<String, Object> completion : completedCommands) {
             try {
-                mirrorOne(robotCode, completion);
+                if (mirrorOne(robotCode, completion, pendingCmdId)) {
+                    externalIds.add(str(completion.get("id")));
+                }
             } catch (Exception e) {
                 log.warn("外部动作镜像失败: robot={} error={}", robotCode, e.getMessage());
             }
         }
+        return externalIds;
     }
 
-    private void mirrorOne(String robotCode, Map<String, Object> completion) {
+    /**
+     * @return true 表示该回执属于外部命令（无论是否新入库，重复投递也算外部）
+     */
+    private boolean mirrorOne(String robotCode, Map<String, Object> completion, Integer pendingCmdId) {
         String uid = str(completion.get("rmf_command_uid"));
         if (uid != null && uid.startsWith(SCHEDULER_UID_PREFIX)) {
-            return;
+            return false;
+        }
+        // 调度自身命令（mock 回显 sched: 前缀 uid；真机生成自有 uid，按 pending cmd_id 匹配排除）
+        if (pendingCmdId != null) {
+            String completionCmdId = str(completion.get("cmd_id"));
+            if (String.valueOf(pendingCmdId).equals(completionCmdId)) {
+                return false;
+            }
         }
         String rmsCommandId = str(completion.get("id"));
-        if (rmsCommandId == null || repository.existsByRmsCommandId(rmsCommandId)) {
-            return;
+        if (rmsCommandId == null) {
+            return false;
         }
+        if (!repository.existsByRmsCommandId(rmsCommandId)) {
+            ExternalActivityRecord record = buildRecord(robotCode, completion, rmsCommandId);
+            repository.insert(record);
+            log.info("外部动作回执镜像: robot={} body_task_id={} action={} status={} msg={}",
+                    robotCode, record.getBodyTaskId(), record.getActionType(),
+                    record.getActionStatus(), record.getFailureMessage());
+        }
+        return true;
+    }
+
+    private ExternalActivityRecord buildRecord(String robotCode, Map<String, Object> completion, String rmsCommandId) {
         ExternalActivityRecord record = new ExternalActivityRecord();
         record.setRobotCode(robotCode);
         record.setRmsCommandId(rmsCommandId);
@@ -72,6 +102,11 @@ public class ExternalActivityMirror {
                     Map<String, Object> reportMap = (Map<String, Object>) report;
                     record.setResultReport(reportMap);
                 }
+                // 失败原因（如"任务模板不存在"）——上层从镜像读结果时能看到失败细节
+                String msg = str(data.get("msg"));
+                if (msg != null && record.getActionStatus() != null && record.getActionStatus() != 3) {
+                    record.setFailureMessage(msg);
+                }
             }
             // RMS 契约：timestamp 在 raw_result 根层（机器人上报时间）
             Object ts = raw.get("timestamp");
@@ -80,9 +115,7 @@ public class ExternalActivityMirror {
             }
         }
         record.setCreatedAtMillis(System.currentTimeMillis());
-        repository.insert(record);
-        log.info("外部动作回执镜像: robot={} body_task_id={} action={} status={}",
-                robotCode, record.getBodyTaskId(), record.getActionType(), record.getActionStatus());
+        return record;
     }
 
     private String str(Object value) {

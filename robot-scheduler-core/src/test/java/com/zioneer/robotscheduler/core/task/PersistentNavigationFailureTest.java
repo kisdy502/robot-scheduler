@@ -50,6 +50,7 @@ class PersistentNavigationFailureTest {
         when(gateway.navigate(anyString(), anyInt(), anyString(), anyDouble(), anyDouble(), anyDouble(), any(), any()))
                 .thenAnswer(call -> {
                     robot.setX(5);
+                    robot.setUpdatedAtMillis(System.currentTimeMillis());
                     commands.onCompletedCommands("R1", List.of(Map.of(
                             "cmd_id", call.getArgument(1), "status", "COMPLETED")));
                     doThrow(new IllegalStateException("db unavailable")).when(store).saveTraffic(any());

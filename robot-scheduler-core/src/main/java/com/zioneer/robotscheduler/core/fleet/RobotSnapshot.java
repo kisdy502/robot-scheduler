@@ -37,6 +37,9 @@ public class RobotSnapshot {
     private double y;
     private double yaw;
 
+    /** RMS 缺失坐标时显式标记无效，默认数值 0 不能作为到点证据。 */
+    private boolean positionValid = true;
+
     /** 电量百分比 0-100（对 RMS 的 0-100 值不做换算，对外输出保留 1 位小数）。 */
     private Double battery;
 
@@ -69,8 +72,15 @@ public class RobotSnapshot {
 
     /** 是否可接受任务派发（下线/错误/暂停/未知模式/离图时为 false）。 */
     private boolean dispatchable;
+    /** 不可派的具体原因（null=可派；使用权占用/停止确认中/地图不一致/离图/状态异常），观测与排障直出。 */
+    private String dispatchBlockedReason;
     /** 基础导航就绪状态，独立于任务流使用权；旧镜像为空时兼容 dispatchable。 */
     private Boolean navigationReady;
+
+    /** 当前持有使用权的 taskflow（无占用为 null）。 */
+    private String ownedByTaskflow;
+    /** 使用权取得时间（毫秒，无占用为 null）——占用时长展示与租约判据。 */
+    private Long ownedSinceMillis;
 
     /** 状态更新时间（毫秒）。 */
     private long updatedAtMillis;

@@ -57,7 +57,7 @@ class RobotRuntimePostgresTest {
         {
             var repository = new MybatisRobotRuntimeRepository(template.getMapper(RobotRuntimeMapper.class), manager);
             var active = new OperationUse("R1", "flow", "photo", "running", 1000, null);
-            repository.saveUsage(new RobotUsageSnapshot("R1", "flow", active, null, "map", "v1"));
+            repository.saveUsage(new RobotUsageSnapshot("R1", "flow", active, null, "map", "v1", 1000L, 1000L));
             repository.saveTraffic(new TrafficSnapshot("R1", Set.of("S"), Set.of("W"), "H", null,
                     true, true, 2000, "map", "v1"));
             first = repository.nextCommandId("R1");
@@ -72,7 +72,7 @@ class RobotRuntimePostgresTest {
                 assertThat(state.stopAccepted()).isTrue();
             });
             var finished = new OperationUse("R1", "flow", "photo", "finished", 1000, 3000L);
-            repository.saveUsage(new RobotUsageSnapshot("R1", null, null, finished, "map", "v1"));
+            repository.saveUsage(new RobotUsageSnapshot("R1", null, null, finished, "map", "v1", null, null));
             repository.saveTraffic(new TrafficSnapshot("R1", Set.of(), Set.of(), null, "S", false,
                     false, 0, "map", "v1"));
             assertThat(repository.nextCommandId("R1")).isEqualTo(first + 1);
@@ -90,7 +90,7 @@ class RobotRuntimePostgresTest {
                 assertThat(state.dwellSegmentId()).isEqualTo("S");
             });
             new TransactionTemplate(manager).executeWithoutResult(status -> {
-                repository.saveUsage(new RobotUsageSnapshot("R2", "flow-other", null, null, "map", "v1"));
+                repository.saveUsage(new RobotUsageSnapshot("R2", "flow-other", null, null, "map", "v1", 1000L, 1000L));
                 status.setRollbackOnly();
             });
             assertThat(repository.findUsages()).anySatisfy(state -> {
@@ -98,7 +98,7 @@ class RobotRuntimePostgresTest {
                 assertThat(state.taskflowId()).isEqualTo("flow-other");
             });
             assertThatThrownBy(() -> repository.saveUsage(
-                    new RobotUsageSnapshot("R3", "flow-other", null, null, "map", "v1")))
+                    new RobotUsageSnapshot("R3", "flow-other", null, null, "map", "v1", 1000L, 1000L)))
                     .isInstanceOf(RuntimeException.class);
             assertThat(repository.findUsages()).noneMatch(state -> "R3".equals(state.robotCode()));
             // 并发分配序号时，事务必须在锁内提交，不能因后一个请求读到旧值而重号。

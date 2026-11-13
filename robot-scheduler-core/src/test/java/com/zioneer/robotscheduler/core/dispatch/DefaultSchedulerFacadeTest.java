@@ -814,11 +814,12 @@ class DefaultSchedulerFacadeTest {
         assertThat(captor.getValue().goalWaypointId()).isEqualTo("C1");
     }
 
-    // dispatch_task 顶层 task_template_code 而 parameters 为空：code 注入 goal params 透传给机器人侧 start-activity 查模板
+    // dispatch_task 顶层 task_template_code（新版架构）：移动命令不注入模板字段——
+    // 真机对 description.task_template_code 强校验（未下发模板拒绝 navigate），模板由上层 start-activity 自带
     @Test
     void dispatchTask_chargeTopLevelTemplateCode_injectedIntoGoalParams() {
         // 真实任务流样例：task_template_code 为顶层字段（auto-goto-charge101），parameters 为空——
-        // 机器人侧 start-activity 按模板 code 查模板，顶层 code 必须注入 params 透传到 description
+        // 断言：目标充电位正常解析，且模板 code 不再进入 goal params（navigate 描述保持纯移动对账字段）
         seedRobot("R001", "RG001", "idle");
         chargerPool.register(charger("C1", "C1", "charger"));
 
@@ -831,7 +832,7 @@ class DefaultSchedulerFacadeTest {
         org.mockito.Mockito.verify(executionEngine)
                 .submit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq("R001"), captor.capture());
         assertThat(captor.getValue().goalWaypointId()).isEqualTo("C1");
-        assertThat(captor.getValue().parameters().get("task_template_code")).isEqualTo("auto-goto-charge101");
+        assertThat(captor.getValue().parameters()).doesNotContainKey("task_template_code");
     }
 
     // dispatch_task quality_inspection 目标非作业点（P1 为 path 类型）：fail-fast 返回 400 且任务不落库

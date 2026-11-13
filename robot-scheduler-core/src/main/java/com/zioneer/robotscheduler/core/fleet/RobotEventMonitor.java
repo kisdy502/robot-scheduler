@@ -190,19 +190,6 @@ public class RobotEventMonitor {
     }
 
     /**
-     * 地图疑似不一致（行为校验：到达回执后实际上报位置与目标点偏差超阈值）。
-     * 典型场景：机器人 SLAM 加载了同名不同版本的地图，点位坐标错位 → 乱走乱撞。
-     */
-    public void onMapSuspect(String robotCode, String detail) {
-        try {
-            record(robotCode, "MAP", "MAP_SUSPECT", "ERROR", null, null,
-                    "地图疑似不一致: " + detail, false);
-        } catch (Exception e) {
-            log.warn("地图疑似不一致事件记录失败: robot={} error={}", robotCode, e.getMessage());
-        }
-    }
-
-    /**
      * 地图一致性变化（机器人 SLAM 地图标识 vs 调度激活地图）：不一致 ERROR + 禁止派发，恢复 INFO。
      * 标识未上报（旧协议）不判定。变化去重：只在状态翻转时记录。
      */
@@ -238,12 +225,24 @@ public class RobotEventMonitor {
      * @param taskflowId 占用方任务流标识
      */
     public void onUsage(String robotCode, String taskflowId, boolean occupied) {
+        onUsageKind(robotCode, taskflowId, occupied ? "OCCUPIED" : "RELEASED", null);
+    }
+
+    /**
+     * 使用权变化的细分类型（FORCE_RELEASED 强制释放 / ORPHAN_RELEASED 孤儿回收，均带审计 detail）。
+     */
+    public void onUsageKind(String robotCode, String taskflowId, String kind, String detail) {
         try {
-            record(robotCode, "USAGE", occupied ? "OCCUPIED" : "RELEASED", "INFO",
-                    occupied ? null : taskflowId, taskflowId,
-                    occupied ? "机器人被任务流抢占: " + taskflowId
-                            : "机器人已释放（任务流 " + taskflowId + " 结束占用）",
-                    false);
+            boolean occupied = "OCCUPIED".equals(kind);
+            String message = occupied ? "机器人被任务流抢占: " + taskflowId
+                    : switch (kind) {
+                        case "FORCE_RELEASED" -> "机器人使用权强制释放（" + taskflowId + "）: " + detail;
+                        case "ORPHAN_RELEASED" -> "机器人使用权孤儿回收（" + taskflowId + "）: " + detail;
+                        default -> "机器人已释放（任务流 " + taskflowId + " 结束占用）";
+                    };
+            String severity = "FORCE_RELEASED".equals(kind) || "ORPHAN_RELEASED".equals(kind) ? "WARN" : "INFO";
+            record(robotCode, "USAGE", kind, severity,
+                    occupied ? null : taskflowId, taskflowId, message, false);
         } catch (Exception e) {
             log.warn("占用事件记录失败: robot={} taskflow={} error={}", robotCode, taskflowId, e.getMessage());
         }
