@@ -741,30 +741,28 @@ public class TaskExecutionEngine {
             boolean finalLeg = i >= routeWaypoints.size() - 1;
             // RMF 成熟做法：信任回执（机器人 nav 栈自身保证到点精度，如 nav2 xy_goal_tolerance 0.12m）。
             // 途经点不做几何闸门（RMF 无此概念，位姿上报滞后不再制造误判失败）；
-            // 终点仅做地图错位兜底：偏差 >3m（11-28 真实事故特征阈值）才失败止损，
-            // 0.3m~3m 记 WARN 观测事件不卡任务。地图名不一致由 MAP_MISMATCH 检查在派发前拦截。
+            // 终点偏差纯观测（RMF 完全信任回执模式）：不设任何距离闸门——
+            // 回执成功即到达，偏差只记 WARN 事件供排障（位姿上报滞后/里程计漂移不再造成误判失败）。
+            // 地图不一致由 MAP_MISMATCH 检查在派发前拦截（11-28 事故防线）。
             if (finalLeg) {
                 double deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next,
-                        commandIssuedAt, state, FINAL_MAP_SUSPECT_METERS);
+                        commandIssuedAt, state, FINAL_ARRIVAL_TOLERANCE_METERS);
                 if (state.isCanceled()) return false;
-                // 位置无效/过期时无法做错位兜底：信任回执继续（不判失败）
-                if (Double.isFinite(deviation) && deviation > FINAL_MAP_SUSPECT_METERS) {
-                    String detail = String.format(
-                            "到达位置疑似地图错位 %s：偏差 %.3fm（止损阈值 %.1fm，目标 (%.4f,%.4f)，实际 (%.4f,%.4f)）；绑定地图 %s",
-                            next, deviation, FINAL_MAP_SUSPECT_METERS, waypoint.getX(), waypoint.getY(),
-                            latestRobotX(robotCode), latestRobotY(robotCode),
-                            state.mapBinding.snapshot().map(MapSnapshot::metadata).map(m -> m.getMapName()).orElse("未知"));
-                    log.warn("到达位置疑似地图错位: task={} robot_code={} target={} {}", kernelTaskId, robotCode, next, detail);
-                    retainAndStop(robotCode, "到达位置疑似地图错位");
-                    publishTerminal(kernelTaskId, state, "failed", "导航分段异常: " + detail);
-                    return false;
-                }
                 if (Double.isFinite(deviation) && deviation > FINAL_ARRIVAL_TOLERANCE_METERS) {
-                    log.warn("到达偏差超精度容差（信任回执继续，RMF 模式）: task={} robot={} waypoint={} deviation={}m",
-                            kernelTaskId, robotCode, next, String.format("%.2f", deviation));
+                    boolean suspect = deviation > FINAL_MAP_SUSPECT_METERS;
+                    String message = suspect
+                            ? String.format("到达 %s 偏差 %.2fm（回执成功，疑似位姿漂移——回执为准继续，请核查机器人定位）",
+                                    next, deviation)
+                            : String.format("到达 %s 偏差 %.2fm（回执成功，信任回执继续）", next, deviation);
+                    log.warn("到达偏差超精度容差（信任回执继续）: task={} robot={} waypoint={} deviation={}m suspect={}",
+                            kernelTaskId, robotCode, next, String.format("%.2f", deviation), suspect);
                     publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
-                            String.format("到达 %s 偏差 %.2fm（回执成功，信任回执继续）", next, deviation),
-                            withAssignmentTrace(state, Map.of()));
+                            message, withAssignmentTrace(state, Map.of()));
+                    if (suspect && eventMonitor != null) {
+                        eventMonitor.onArrivalDrift(robotCode, String.format(
+                                "任务 %s 终点 %s 到达偏差 %.2fm（回执成功，位姿漂移观测）",
+                                kernelTaskId, next, deviation));
+                    }
                 }
             }
             state.navigationInFlight = false;

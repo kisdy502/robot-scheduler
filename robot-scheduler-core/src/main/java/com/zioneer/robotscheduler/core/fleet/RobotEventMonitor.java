@@ -220,6 +220,18 @@ public class RobotEventMonitor {
     }
 
     /**
+     * 到达位姿漂移观测（回执成功但终点偏差大——不判失败，事件供排障核查机器人定位）。
+     */
+    public void onArrivalDrift(String robotCode, String detail) {
+        try {
+            record(robotCode, "MAP", "ARRIVAL_DRIFT", "WARN", null, null,
+                    "到达位姿漂移观测: " + detail, false);
+        } catch (Exception e) {
+            log.warn("到达漂移事件记录失败: robot={} error={}", robotCode, e.getMessage());
+        }
+    }
+
+    /**
      * 机器人使用权变化（上层应用抢占/释放；调度领域事件，前端任务时间线可见）。
      *
      * @param taskflowId 占用方任务流标识
