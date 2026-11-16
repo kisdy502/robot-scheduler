@@ -789,13 +789,11 @@ class TaskExecutionEngineTest {
         });
     }
 
-    // 回执成功但仍距目标 2.55m：不得发布到达或启动业务，必须失败并保留交通占用。
-    // 回执成功但距目标超容差（分级容差：终点 0.3m），任务失败并保留交通占用。
+    // RMF 信任回执模式：终点偏差 >3m（地图错位止损阈值）才失败并保留交通占用。
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(doubles = {2.55, 0.301, 0.5})
+    @org.junit.jupiter.params.provider.ValueSource(doubles = {3.5, 5.5})
     void navigationCompletion_outsideTolerance_failsAndRetainsTraffic(double deviation) {
         engine.arrivalConfirmAttempts = 1;
-        engine.arrivalCorrectionAttempts = 0;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("arrival-missed", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -808,7 +806,7 @@ class TaskExecutionEngineTest {
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
             verify(publisher, atLeastOnce()).publishEvent(events.capture());
             assertThat(events.getAllValues()).anyMatch(event -> "failed".equals(event.status())
-                    && event.message().contains("实际未到点"));
+                    && event.message().contains("疑似地图错位"));
             assertThat(events.getAllValues()).noneMatch(event -> "completed".equals(event.status())
                     || (event.message() != null && event.message().contains("已到达 WP_B")));
             assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
@@ -816,10 +814,11 @@ class TaskExecutionEngineTest {
         });
     }
 
-    // 20cm 内且位置帧有效才能完成，覆盖靠近边界的合格位置。
+    // RMF 信任回执模式：0.3m~3m 偏差不卡任务（位姿滞后/正常停位波动照常完成）。
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(doubles = {0.0, 0.19, 0.2})
-    void navigationCompletion_withinTwentyCentimeters_completes(double deviation) {
+    @org.junit.jupiter.params.provider.ValueSource(doubles = {0.0, 0.19, 0.5, 2.55})
+    void navigationCompletion_smallDeviation_trustsReceiptAndCompletes(double deviation) {
+        engine.arrivalConfirmAttempts = 1;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("arrival-ok", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -835,12 +834,11 @@ class TaskExecutionEngineTest {
         });
     }
 
-    // 坐标即使等于目标，过期、离线或非有限位置也不能确认到点。
+    // 位置无效/过期时无法做地图错位兜底：信任回执继续（RMF 模式），不再判失败。
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"stale", "offline", "nan", "missing", "noCoordinates"})
-    void navigationCompletion_invalidPosition_fails(String invalid) {
+    void navigationCompletion_invalidPosition_trustsReceiptAndCompletes(String invalid) {
         engine.arrivalConfirmAttempts = 1;
-        engine.arrivalCorrectionAttempts = 0;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("arrival-invalid", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -859,17 +857,14 @@ class TaskExecutionEngineTest {
         ArgumentCaptor<TaskStateEvent> events = ArgumentCaptor.forClass(TaskStateEvent.class);
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
             verify(publisher, atLeastOnce()).publishEvent(events.capture());
-            assertThat(events.getAllValues()).anyMatch(event -> "failed".equals(event.status())
-                    && event.message().contains("实际未到点"));
-            assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
+            assertThat(events.getAllValues()).anyMatch(event -> "completed".equals(event.status()));
         });
     }
 
-    // 回执成功但位置持续偏离目标：按未到点失败保护，不根据距离猜测地图异常。
+    // 终点偏差 >3m：按地图错位止损失败（消息不再含"地图不一致"字样——由 MAP_MISMATCH 检查负责）。
     @Test
     void navigationCompletion_withLargeArrivalDeviation_failsWithoutGuessingCause() {
         engine.arrivalConfirmIntervalMillis = 100;
-        engine.arrivalCorrectionAttempts = 0;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("task-mm", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -886,17 +881,17 @@ class TaskExecutionEngineTest {
             verify(publisher, atLeastOnce()).publishEvent(events.capture());
             assertThat(events.getAllValues()).anyMatch(event ->
                     "failed".equals(event.status()) && event.message() != null
-                            && event.message().contains("实际未到点"));
+                            && event.message().contains("疑似地图错位"));
             assertThat(events.getAllValues()).noneMatch(event -> event.message() != null
                     && event.message().contains("地图不一致"));
             assertThat(trafficRegistry.isAwaitingStop("R001")).isTrue();
         });
     }
 
-    // 位置帧滞后于完成回执：首采超阈后多轮复核，位置帧跟上后复核通过，任务正常完成
+    // 位置帧滞后于完成回执：RMF 信任回执模式下直接完成（位姿滞后不卡任务），
+    // 偏差 0.5m < 3m 止损阈值不触发失败。
     @Test
-    void navigationCompletion_withDelayedPositionFrame_completesAfterRecheck() {
-        // 等待位置确认期间保留目标预约，不发布到达；新位置跟上后才完成。
+    void navigationCompletion_withDelayedPositionFrame_completesByReceipt() {
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("task-mm-lag", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -905,18 +900,13 @@ class TaskExecutionEngineTest {
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
                 verify(gateway).navigate(eq("R001"), cmdIdCaptor.capture(), eq("F1"), eq(6.0),
                         eq(0.0), eq(0.0), anyDouble(), any()));
-        // 回执先到，但位置尚未到点。
+        // 回执先到，位置滞后 0.5m：信任回执直接完成。
+        var snapshot = fleetStateMirror.list().getFirst();
+        snapshot.setX(6.0 - 0.5);
+        snapshot.setY(0);
+        snapshot.setUpdatedAtMillis(System.currentTimeMillis());
         injectCompletion("R001", cmdIdCaptor.getValue(), "COMPLETED");
         ArgumentCaptor<TaskStateEvent> events = ArgumentCaptor.forClass(TaskStateEvent.class);
-        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
-            verify(publisher, atLeastOnce()).publishEvent(events.capture());
-            assertThat(events.getAllValues()).anyMatch(event -> event.message() != null
-                    && event.message().contains("等待实际到点确认"));
-            assertThat(events.getAllValues()).noneMatch(event -> "completed".equals(event.status())
-                    || (event.message() != null && event.message().contains("已到达 WP_B")));
-            assertThat(trafficRegistry.occupiedWaypoints()).contains("WP_B");
-        });
-        completeNavigationAt("R001", cmdIdCaptor.getValue(), 6.0, 0.0);
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
             verify(publisher, atLeastOnce()).publishEvent(events.capture());
             assertThat(events.getAllValues()).anyMatch(event -> "completed".equals(event.status()));

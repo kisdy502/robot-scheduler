@@ -72,17 +72,14 @@ public class TaskExecutionEngine {
 
     /** 实际到点位置误差上限为 20cm。 */
     private static final double ARRIVAL_TOLERANCE_METERS = 0.2;
-    /** 途经点通过容差：中间点只需"大致通过"（交管释放由驻留 0.8m 逻辑兜底），真机停位精度 2-5 分米级。 */
-    private static final double WAYPOINT_PASS_TOLERANCE_METERS = 0.5;
-    /** 最终目标点容差：业务精度的最后一道闸（原 0.2 压线误杀 0.21-0.23m 的正常停位）。 */
+    /** 终点偏差 WARN 阈值（超过记观测事件但不卡任务，RMF 信任回执模式）。 */
     private static final double FINAL_ARRIVAL_TOLERANCE_METERS = 0.3;
+    /** 终点地图错位止损阈值（11-28 真实事故特征：名字对坐标错导致停错位置 2.5m+）。 */
+    private static final double FINAL_MAP_SUSPECT_METERS = 3.0;
     private static final long ARRIVAL_MAX_STATE_AGE_MILLIS = 8000;
 
     /** 成功回执后等待位置确认，默认最多约 10 秒；期间不释放后续交通占用。 */
     int arrivalConfirmAttempts = 11;
-
-    /** 到点复核未过时的纠偏重驾次数（0=禁用，测试用；生产 2——位姿滞后/本体短停的自愈）。 */
-    int arrivalCorrectionAttempts = 2;
 
     /** 到达偏差复核采样间隔（毫秒，对齐状态轮询 1Hz；测试可注入缩短）。 */
     long arrivalConfirmIntervalMillis = 1000;
@@ -741,57 +738,34 @@ public class TaskExecutionEngine {
             if (state.isCanceled()) {
                 return false;
             }
-            // 回执成功不代表实际到点：分级容差复核（途经 0.5m / 终点 0.3m），位置滞后时有限等待后再决定失败。
             boolean finalLeg = i >= routeWaypoints.size() - 1;
-            double tolerance = finalLeg ? FINAL_ARRIVAL_TOLERANCE_METERS : WAYPOINT_PASS_TOLERANCE_METERS;
-            if (!withinTolerance(arrivalDeviation(robotCode, waypoint, commandIssuedAt), tolerance)) {
-                publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
-                        "导航回执成功，等待实际到点确认: " + next + String.format("（位置容差 %.2fm）", tolerance),
-                        withAssignmentTrace(state, Map.of()));
-            }
-            double deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next,
-                    commandIssuedAt, state, tolerance);
-            if (state.isCanceled()) return false;
-            if (!withinTolerance(deviation, tolerance)) {
-                // 纠偏重驾：回执成功但复核未过——位姿上报滞后或本体短停（实测偏差 2.5m 停车报成功）。
-                // 重发同点位导航最多 2 次：位姿滞后则新帧到达即过，短停则补走最后一程。
-                for (int correction = 1; correction <= arrivalCorrectionAttempts && !state.isCanceled(); correction++) {
-                    log.info("到点复核未过（偏差 {}m），第 {} 次纠偏重驾: task={} robot={} waypoint={}",
-                            String.format("%.2f", deviation), correction, kernelTaskId, robotCode, next);
-                    publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
-                            String.format("到点复核未过（偏差 %.2fm），纠偏重驾 %s（第 %d 次）", deviation, next, correction),
-                            withAssignmentTrace(state, Map.of()));
-                    state.navigationInFlight = true;
-                    long correctionIssuedAt = System.currentTimeMillis();
-                    RobotCommandExecutor.CommandHandle corrHandle = commandExecutor.submitNavigation(
-                            robotCode, floorId, waypoint.getX(), waypoint.getY(), waypoint.getTheta(),
-                            finalApproachSpeed(state, robotCode, waypoint), description);
-                    double corrTimeout = Math.max(30, Math.hypot(latestRobotX(robotCode) - waypoint.getX(),
-                            latestRobotY(robotCode) - waypoint.getY()) / 0.3 + navigationTimeoutBaseSeconds);
-                    RobotCommandExecutor.CommandResult corrResult = awaitChargeAware(corrHandle, corrTimeout,
-                            kernelTaskId, robotCode, "纠偏重驾 " + next, state);
-                    if (!corrResult.completed()) {
-                        deviation = Double.isFinite(deviation) ? deviation : Double.MAX_VALUE;
-                        break;
-                    }
-                    deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next,
-                            correctionIssuedAt, state, tolerance);
-                    if (withinTolerance(deviation, tolerance)) {
-                        log.info("纠偏重驾后复核通过: task={} robot={} waypoint={}", kernelTaskId, robotCode, next);
-                        break;
-                    }
+            // RMF 成熟做法：信任回执（机器人 nav 栈自身保证到点精度，如 nav2 xy_goal_tolerance 0.12m）。
+            // 途经点不做几何闸门（RMF 无此概念，位姿上报滞后不再制造误判失败）；
+            // 终点仅做地图错位兜底：偏差 >3m（11-28 真实事故特征阈值）才失败止损，
+            // 0.3m~3m 记 WARN 观测事件不卡任务。地图名不一致由 MAP_MISMATCH 检查在派发前拦截。
+            if (finalLeg) {
+                double deviation = confirmArrivalDeviation(robotCode, waypoint, kernelTaskId, next,
+                        commandIssuedAt, state, FINAL_MAP_SUSPECT_METERS);
+                if (state.isCanceled()) return false;
+                // 位置无效/过期时无法做错位兜底：信任回执继续（不判失败）
+                if (Double.isFinite(deviation) && deviation > FINAL_MAP_SUSPECT_METERS) {
+                    String detail = String.format(
+                            "到达位置疑似地图错位 %s：偏差 %.3fm（止损阈值 %.1fm，目标 (%.4f,%.4f)，实际 (%.4f,%.4f)）；绑定地图 %s",
+                            next, deviation, FINAL_MAP_SUSPECT_METERS, waypoint.getX(), waypoint.getY(),
+                            latestRobotX(robotCode), latestRobotY(robotCode),
+                            state.mapBinding.snapshot().map(MapSnapshot::metadata).map(m -> m.getMapName()).orElse("未知"));
+                    log.warn("到达位置疑似地图错位: task={} robot_code={} target={} {}", kernelTaskId, robotCode, next, detail);
+                    retainAndStop(robotCode, "到达位置疑似地图错位");
+                    publishTerminal(kernelTaskId, state, "failed", "导航分段异常: " + detail);
+                    return false;
                 }
-            }
-            if (state.isCanceled()) return false;
-            if (!withinTolerance(deviation, tolerance)) {
-                String detail = String.format(
-                        "回执成功但实际未到点 %s：偏差 %.3fm（容差 %.2fm，目标 (%.4f,%.4f)，实际 (%.4f,%.4f)）；位置缺失、过期或离线同样不能确认到点，绑定地图 %s",
-                        next, deviation, tolerance, waypoint.getX(), waypoint.getY(), latestRobotX(robotCode), latestRobotY(robotCode),
-                        state.mapBinding.snapshot().map(MapSnapshot::metadata).map(m -> m.getMapName()).orElse("未知"));
-                log.warn("导航到点确认失败: task={} robot_code={} target={} {}", kernelTaskId, robotCode, next, detail);
-                retainAndStop(robotCode, "导航到达位置异常");
-                publishTerminal(kernelTaskId, state, "failed", "导航分段异常: " + detail);
-                return false;
+                if (Double.isFinite(deviation) && deviation > FINAL_ARRIVAL_TOLERANCE_METERS) {
+                    log.warn("到达偏差超精度容差（信任回执继续，RMF 模式）: task={} robot={} waypoint={} deviation={}m",
+                            kernelTaskId, robotCode, next, String.format("%.2f", deviation));
+                    publishRaw(kernelTaskId, null, robotCode, goal, "underway", null,
+                            String.format("到达 %s 偏差 %.2fm（回执成功，信任回执继续）", next, deviation),
+                            withAssignmentTrace(state, Map.of()));
+                }
             }
             state.navigationInFlight = false;
             // 到达本段终点：释放已走过的路径段 + 身后途经点（交通资源渐进释放）
