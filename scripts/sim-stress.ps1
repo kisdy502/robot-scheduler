@@ -17,7 +17,9 @@ param(
 $Scheduler = "http://127.0.0.1:8091"
 $Rms = "http://127.0.0.1:18083"
 $QcTemplate = "LAD-28-A-not-lift"
-$ChargeTemplate = "back-charge"
+# 充电模板：code "charge" 是上位机 RmsTemplateStore 内置兜底模板（内容不校验，全机通用）；
+# 真机平台有正式充电模板 code 时替换（如 back-charge，需预置到上位机 data/rms-templates/）
+$ChargeTemplate = "charge"
 $StopFile = Join-Path $PSScriptRoot "..\logs\sim-stress.stop"
 $ResultFile = Join-Path $PSScriptRoot "..\logs\sim-stress-results.jsonl"
 $MoveTimeoutSec = 600
@@ -192,7 +194,7 @@ function Ensure-Charged([string]$Robot, [array]$Chargers) {
     $charger = Select-NearestCharger $state $Chargers
     if ($null -eq $charger) { Write-Output "[lane $Robot] 无充电位可用"; return }
 
-    # 抢占 + 移动到充电位（纯移动，本体到位自充）
+    # 抢占 + 移动到充电位（纯移动，到位后显式启动充电）
     $tf = New-TaskFlowId
     $taskId = "$tf$(New-BizTs)"
     $ab = ('{"taskflow_id":' + $tf + ',"task_template_type_list":["charge"],"robot_code":"' + $Robot + '"}')
@@ -203,12 +205,45 @@ function Ensure-Charged([string]$Robot, [array]$Chargers) {
     if ($r.ok) {
         $null = Wait-MoveDone $taskId
     }
-    $null = Release-WithRetry $tf $Robot
-    Append-Result $Robot "charge" $taskId "ok" "-" ("低电回充 {0}% -> {1}" -f $bat, $charger.id) 0
 
-    # 等电量恢复到作业阈值
+    # 到位后启动充电（RMS start-activity，模板 code 用内置 "charge"——上位机 RmsTemplateStore 自带兜底模板，
+    # 内容不校验，全机通用无需下发；真机平台模板另行预置时改 $ChargeTemplate）
+    $batOnArrival = $bat
+    $chargeStarted = $false
+    if ($r.ok) {
+        $desc = @{
+            rmf_task_id = "stress.$taskId"; task_template_type = "charge"
+            task_template_code = $ChargeTemplate; end_point = "$($charger.id)"
+            destination = @{ x = [double]$charger.x; y = [double]$charger.y; yaw = [double](ThetaOf $charger) }
+            task_id = $taskId; taskflow_id = "$tf"; nav_target_point = "$($charger.id)"
+        }
+        $payload = @{ activity = $ChargeTemplate; description = $desc; label = "$tf|$ChargeTemplate"; cmd_id = 1 }
+        $r2 = Post-Json "$Rms/api/v1/robot-management/rmf/robots/$Robot/start-activity" ($payload | ConvertTo-Json -Depth 6)
+        if ($r2.ok -and $r2.body -and $r2.body.status -eq 0) {
+            $chargeStarted = $true
+            Write-Output ("[lane {0}] 充电指令已受理（模板 {1}）" -f $Robot, $ChargeTemplate)
+        } else {
+            Write-Output ("[lane {0}] 充电指令被拒: {1}" -f $Robot, (MsgOf $r2.body $r2.raw))
+        }
+    }
+    $null = Release-WithRetry $tf $Robot
+    Append-Result $Robot "charge" $taskId "ok" "-" ("低电回充 {0}% -> {1} chargeStarted={2}" -f $bat, $charger.id, $chargeStarted) 0
+
+    # 等充电确认（mode=charging 或电量回升，120s 内）；未确认则告警继续等电量（可能本体自充）
+    if ($chargeStarted) {
+        $deadline = (Get-Date).AddSeconds(120)
+        while ((Get-Date) -lt $deadline -and -not (ShouldStop)) {
+            Start-Sleep -Seconds 10
+            $s = Get-RobotState $Robot
+            if ($null -eq $s -or $null -eq $s.battery) { continue }
+            if ($s.mode -eq "charging" -or [double]$s.battery -gt $batOnArrival) { break }
+        }
+    }
+
+    # 等电量恢复到作业阈值（上限 2 小时：机器人/主机宕机时不能无限等，超时回到主循环重新评估）
+    $chargeWaitDeadline = (Get-Date).AddHours(2)
     Write-Output ("[lane {0}] 充电中，等待电量 >= {1}%" -f $Robot, $ResumeBatteryPercent)
-    while (-not (ShouldStop)) {
+    while (-not (ShouldStop) -and (Get-Date) -lt $chargeWaitDeadline) {
         Start-Sleep -Seconds 30
         $state = Get-RobotState $Robot
         if ($null -eq $state -or $null -eq $state.battery) { continue }
@@ -341,7 +376,13 @@ function Run-Lane([string]$Robot) {
 # ---------------- 统计（父进程周期输出 + 终局汇总共用） ----------------
 function Read-RoundRows() {
     $rows = @()
-    foreach ($line in (Get-Content $ResultFile -Encoding UTF8)) {
+    $lines = @()
+    try {
+        $lines = Get-Content $ResultFile -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        return $rows
+    }
+    foreach ($line in $lines) {
         if ($line.Trim()) { try { $rows += ($line | ConvertFrom-Json) } catch { } }
     }
     return $rows
@@ -394,19 +435,23 @@ function Run-Parent {
     Write-Output ("[stress] lanes started: {0}; stop: {1} tasks / {2}h / stop file" -f $procs.Count, $MaxTotalTasks, $MaxRunHours)
     $startTime = Get-Date
     $lastStats = Get-Date
-    # 监控循环：5000 任务 / 12 小时 / stop 文件 → 自动停；每 30 分钟统计落盘
+    # 监控循环：5000 任务 / 12 小时 / stop 文件 → 自动停；每 30 分钟统计落盘。
+    # 循环体全部 try/catch：单次读文件异常（并发写锁等）绝不能中断监控，否则停止条件永久失效（实测两天卡死事故）
     while (@($procs | Where-Object { -not $_.HasExited }).Count -gt 0) {
-        Start-Sleep -Seconds 60
-        if (((Get-Date) - $startTime).TotalHours -ge $MaxRunHours) {
-            Write-Output "[stress] reached ${MaxRunHours}h limit, stopping"; New-Item -ItemType File -Path $StopFile -Force | Out-Null
-        }
-        $rows = Read-RoundRows
-        if ($rows.Count -ge $MaxTotalTasks) {
-            Write-Output "[stress] reached ${MaxTotalTasks} tasks, stopping"; New-Item -ItemType File -Path $StopFile -Force | Out-Null
-        }
-        if (((Get-Date) - $lastStats).TotalMinutes -ge $StatsIntervalMinutes) {
-            $lastStats = Get-Date
-            Write-Stats "PERIODIC"
+        try {
+            Start-Sleep -Seconds 60
+            $elapsedHours = ((Get-Date) - $startTime).TotalHours
+            $rows = @(Read-RoundRows)
+            if ($elapsedHours -ge $MaxRunHours -or $rows.Count -ge $MaxTotalTasks) {
+                Write-Output ("[stress] limit reached (hours={0:N1} tasks={1}), stopping" -f $elapsedHours, $rows.Count)
+                New-Item -ItemType File -Path $StopFile -Force | Out-Null
+            }
+            if (((Get-Date) - $lastStats).TotalMinutes -ge $StatsIntervalMinutes) {
+                $lastStats = Get-Date
+                Write-Stats "PERIODIC"
+            }
+        } catch {
+            Write-Output ("[stress] monitor cycle error (ignored): " + $_.Exception.Message)
         }
     }
     foreach ($p in $procs) { Wait-Process -Id $p.Id -ErrorAction SilentlyContinue }
