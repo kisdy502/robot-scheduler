@@ -240,14 +240,41 @@ function Ensure-Charged([string]$Robot, [array]$Chargers) {
         }
     }
 
-    # 等电量恢复到作业阈值（上限 2 小时：机器人/主机宕机时不能无限等，超时回到主循环重新评估）
+    # 等电量恢复到作业阈值（上限 2 小时）+ 充电保活监督：
+    # RMS 充电任务是"启动即完成"语义（persistCharging=false，实测 1 秒报成功后充电被关），
+    # 且可能有残留 CHARGING 会话拒绝新指令——电量停滞时清残会话并重发充电指令
     $chargeWaitDeadline = (Get-Date).AddHours(2)
     Write-Output ("[lane {0}] 充电中，等待电量 >= {1}%" -f $Robot, $ResumeBatteryPercent)
+    $lastBat = $batOnArrival
+    $stallCount = 0
     while (-not (ShouldStop) -and (Get-Date) -lt $chargeWaitDeadline) {
         Start-Sleep -Seconds 30
         $state = Get-RobotState $Robot
         if ($null -eq $state -or $null -eq $state.battery) { continue }
-        if ([double]$state.battery -ge $ResumeBatteryPercent) { break }
+        $nowBat = [double]$state.battery
+        if ($nowBat -ge $ResumeBatteryPercent) { break }
+        if ($nowBat -le $lastBat + 0.05) { $stallCount++ } else { $stallCount = 0 }
+        if ($stallCount -ge 2) {
+            Write-Output ("[lane {0}] 充电停滞（{1}%），清残会话并重发充电指令" -f $Robot, $nowBat)
+            $sb = ('{"running_cmd_id":"0","stop_cmd_id":"' + (Get-Random -Maximum 100000) + '"}')
+            $null = Post-Json "$Rms/api/v1/robot-management/rmf/robots/$Robot/stop" $sb
+            Start-Sleep -Seconds 5
+            $tf2 = New-TaskFlowId
+            $chgTaskId = "$tf2$(New-BizTs)"
+            $desc2 = @{
+                rmf_task_id = "stress.chg.$chgTaskId"; task_template_type = "charge"
+                task_template_code = $ChargeTemplate; end_point = "$($charger.id)"
+                destination = @{ x = [double]$charger.x; y = [double]$charger.y; yaw = [double](ThetaOf $charger) }
+                task_id = $chgTaskId; taskflow_id = "$tf2"; nav_target_point = "$($charger.id)"
+            }
+            $payload2 = @{ activity = $ChargeTemplate; description = $desc2; label = "$tf2|$ChargeTemplate"; cmd_id = 2 }
+            $r3 = Post-Json "$Rms/api/v1/robot-management/rmf/robots/$Robot/start-activity" ($payload2 | ConvertTo-Json -Depth 6)
+            if (-not ($r3.ok -and $r3.body -and $r3.body.status -eq 0)) {
+                Write-Output ("[lane {0}] 充电重发被拒: {1}" -f $Robot, (MsgOf $r3.body $r3.raw))
+            }
+            $stallCount = 0
+        }
+        $lastBat = $nowBat
     }
     if (ShouldStop) { return }
 

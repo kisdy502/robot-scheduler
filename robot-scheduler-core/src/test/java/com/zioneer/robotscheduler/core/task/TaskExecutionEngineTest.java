@@ -795,6 +795,7 @@ class TaskExecutionEngineTest {
     @org.junit.jupiter.params.provider.ValueSource(doubles = {2.55, 0.301, 0.5})
     void navigationCompletion_outsideTolerance_failsAndRetainsTraffic(double deviation) {
         engine.arrivalConfirmAttempts = 1;
+        engine.arrivalCorrectionAttempts = 0;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("arrival-missed", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -839,6 +840,7 @@ class TaskExecutionEngineTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"stale", "offline", "nan", "missing", "noCoordinates"})
     void navigationCompletion_invalidPosition_fails(String invalid) {
         engine.arrivalConfirmAttempts = 1;
+        engine.arrivalCorrectionAttempts = 0;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("arrival-invalid", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
@@ -867,6 +869,7 @@ class TaskExecutionEngineTest {
     @Test
     void navigationCompletion_withLargeArrivalDeviation_failsWithoutGuessingCause() {
         engine.arrivalConfirmIntervalMillis = 100;
+        engine.arrivalCorrectionAttempts = 0;
         robotReady("R001", 0.5, 0.0);
         engine.submit(record("task-mm", "go_to_place", "R001"), "R001",
                 new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
