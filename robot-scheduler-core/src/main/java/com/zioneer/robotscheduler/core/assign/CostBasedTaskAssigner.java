@@ -6,6 +6,7 @@ import com.zioneer.robotscheduler.core.fleet.FleetStateMirror;
 import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
 import com.zioneer.robotscheduler.core.map.MapManager;
 import com.zioneer.robotscheduler.core.routing.GraphAttachment;
+import com.zioneer.robotscheduler.core.routing.NavigationGraph;
 import com.zioneer.robotscheduler.core.task.TaskGoal;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -118,7 +119,7 @@ public class CostBasedTaskAssigner implements TaskAssigner {
         return eta + batteryPenaltySeconds(robot) + busyPenaltySeconds(robot);
     }
 
-    /** 规划 ETA：机器人吸附点 → 目标点；无图/不可达时退化为欧氏距离估算。 */
+    /** 规划 ETA：多起点规划（停在点上=单起点；路段中间=两端点取总代价最小）；无图/不可达时退化为欧氏距离估算。 */
     private double estimateEtaSeconds(RobotSnapshot robot, TaskGoal goal) {
         if (!goal.requiresNavigation()) {
             return 0;
@@ -132,15 +133,16 @@ public class CostBasedTaskAssigner implements TaskAssigner {
         if (target == null) {
             return estimateStraightSeconds(robot, goal);
         }
+        double speed = properties.getNavigationMaxSpeedMps();
         GraphAttachment attachment = graph.attach(floorId, robot.getX(), robot.getY(),
                 SchedulerConstants.MAX_MERGE_WAYPOINT_DISTANCE, SchedulerConstants.MAX_MERGE_LANE_DISTANCE);
-        String fromWaypoint = attachment.waypointId();
-        if (fromWaypoint == null) {
+        List<NavigationGraph.StartOption> starts = graph.startOptionsFrom(floorId, attachment,
+                robot.getX(), robot.getY(), speed);
+        if (starts.isEmpty()) {
             return estimateStraightSeconds(robot, goal);
         }
-        double speed = properties.getNavigationMaxSpeedMps();
-        return graph.plan(floorId, fromWaypoint, target.getId(), speed, null)
-                .map(route -> route.etaSeconds())
+        return graph.planFromStarts(floorId, starts, target.getId(), speed, null, null)
+                .map(NavigationGraph.MultiStartRoute::totalSeconds)
                 .orElseGet(() -> estimateStraightSeconds(robot, goal));
     }
 

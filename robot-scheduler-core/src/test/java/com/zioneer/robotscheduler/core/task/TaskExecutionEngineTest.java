@@ -561,6 +561,70 @@ class TaskExecutionEngineTest {
                         anyString(), anyDouble(), anyDouble(), anyDouble(), any(), any()));
     }
 
+    // 路段中间起步（回头路修复）：机器人更靠近近端点 A，但目标在远端方向——
+    // 多起点规划应按"接入代价+路线 ETA"选远端点 M 起步（总路程更短），而非就近端点走回头路。
+    @Test
+    void midSegmentStart_plansFromCheaperEndpoint_notNearest() throws Exception {
+        TaskExecutionEngine engineLong = longEdgeEngine();
+        // 距 A 4.01m、距 M 6.01m（双超点位阈值 3m），距段 0.3m（吸附为路段中间）
+        robotReady("R001", 4, 0.3);
+        String task = engineLong.submit(record("mid-seg", "go_to_place", "R001"), "R001",
+                new TaskGoal("go_to_place", null, "WP_B", null, null, Map.of()));
+
+        // 选中 M 起步：路线 [M, B]，首个导航目标直接是 x=20（旧逻辑选近端 A → 先发 x=10 走回头路）
+        ArgumentCaptor<Integer> command = ArgumentCaptor.forClass(Integer.class);
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(gateway).navigate(eq("R001"),
+                command.capture(), eq("F1"), eq(20.0), eq(0.0), eq(0.0), anyDouble(), any()));
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(publisher, atLeastOnce()).publishEvent(
+                org.mockito.ArgumentMatchers.argThat((Object event) -> event instanceof TaskStateEvent state
+                        && task.equals(state.taskId()) && "underway".equals(state.status())
+                        && List.of("WP_M", "WP_B").equals(state.detail().get("route_waypoints")))));
+        verify(gateway, org.mockito.Mockito.never()).navigate(eq("R001"), anyInt(), anyString(),
+                eq(10.0), anyDouble(), anyDouble(), anyDouble(), any());
+        completeNavigationAt("R001", command.getValue(), 20, 0);
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(publisher, atLeastOnce()).publishEvent(
+                org.mockito.ArgumentMatchers.argThat((Object event) -> event instanceof TaskStateEvent state
+                        && task.equals(state.taskId()) && "completed".equals(state.status()))));
+    }
+
+    /** 长边三点图（A(0)-M(10)-B(20)）：路段中间起步专用（边长超点位吸附阈值 3m 才能命中段吸附）。 */
+    private TaskExecutionEngine longEdgeEngine() throws Exception {
+        String map = """
+                {
+                  "versionInfo": {"version": "v1", "status": "published"},
+                  "mapInfo": {"mapName": "LongEdgeMap", "floors": [{
+                    "floorId": "F1", "defaultMaxSpeed": 1.0,
+                    "waypoints": [
+                      {"id": "WP_A", "position": [0, 0, 0], "type": "charge"},
+                      {"id": "WP_M", "position": [10, 0, 0], "type": "path"},
+                      {"id": "WP_B", "position": [20, 0, 0], "type": "pickup"}
+                    ],
+                    "paths": [
+                      {"id": "P1", "from": "WP_A", "to": "WP_M", "waypoints": ["WP_A", "WP_M"], "isBidirectional": true},
+                      {"id": "P2", "from": "WP_M", "to": "WP_B", "waypoints": ["WP_M", "WP_B"], "isBidirectional": true}
+                    ]
+                  }]}
+                }
+                """;
+        MapManager mapManager = new MapManager(new MapMetadataParser(), mapArchiveRepository);
+        mapManager.activateFromJson(map, null, null);
+        TaskExecutionEngine engineLong = new TaskExecutionEngine(commandExecutor, trafficRegistry, mapManager,
+                fleetStateMirror, new SchedulerEventBus(publisher),
+                new com.zioneer.robotscheduler.core.assign.CostBasedTaskAssigner(fleetStateMirror,
+                        mapManager, assignProperties,
+                        new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry())),
+                assignProperties,
+                waitIntents,
+                new com.zioneer.robotscheduler.core.traffic.ActiveRouteRegistry(mapManager),
+                org.mockito.Mockito.mock(com.zioneer.robotscheduler.core.fleet.RobotEventMonitor.class), ownershipRegistry,
+                new RobotAvailabilityService(ownershipRegistry, new InMemoryTrafficRegistry()));
+        engineLong.robotReadyTimeoutSeconds = 2;
+        engineLong.navigationTimeoutBaseSeconds = 5;
+        engineLong.segmentConservativeSpeedMps = 1000;
+        engineLong.actionTimeoutDefaultSeconds = 3;
+        return engineLong;
+    }
+
     /** 三点链路图（A->M->B 两段）+ 独立引擎（不污染全局 SIMPLE_MAP 单段假设）。 */
     private TaskExecutionEngine threePointEngine() throws Exception {
         String map = """

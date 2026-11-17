@@ -8,6 +8,7 @@ import com.zioneer.robotscheduler.core.fleet.RobotSnapshot;
 import com.zioneer.robotscheduler.core.map.MapManager;
 import com.zioneer.robotscheduler.core.map.MapSnapshot;
 import com.zioneer.robotscheduler.core.routing.NavigationGraph;
+import com.zioneer.robotscheduler.core.routing.NavigationRoute;
 import com.zioneer.robotscheduler.core.routing.GeometryUtil;
 import com.zioneer.robotscheduler.core.map.WaypointMetadata;
 import com.zioneer.robotscheduler.core.repository.TaskRecord;
@@ -1226,74 +1227,56 @@ public class TaskExecutionEngine {
             var attachment = graph.attach(resolveFloorId(state, state.goal()), latestRobotX(robotCode), latestRobotY(robotCode),
                     com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.MAX_MERGE_WAYPOINT_DISTANCE,
                     com.zioneer.robotscheduler.common.scheduler.SchedulerConstants.MAX_MERGE_LANE_DISTANCE);
-            String fromWaypoint = attachment.waypointId();
-            if (fromWaypoint == null && attachment.segmentId() != null) {
-                // 路段中间（距点超阈值、距段在阈值内）：取该段离机器人较近端点作为规划起点
-                fromWaypoint = graph.segmentEdge(resolveFloorId(state, state.goal()), attachment.segmentId())
-                        .map(edge -> nearerSegmentEndpoint(state, robotCode, edge))
-                        .orElse(null);
-            }
-            if (fromWaypoint == null) {
+            // 多起点规划：停在点上=单起点（驻留语义）；路段中间=两端点皆为候选
+            // （接入代价+路线 ETA 取总代价最小），修复"就近端点起步、总路程反而更长"的回头路
+            List<NavigationGraph.StartOption> starts = graph.startOptionsFrom(resolveFloorId(state, state.goal()),
+                    attachment, latestRobotX(robotCode), latestRobotY(robotCode),
+                    assignProperties.getNavigationMaxSpeedMps());
+            if (starts.isEmpty()) {
                 // 吸附失败（机器人离图/位置丢失）：不降级为单点租约——单段直发远目标
                 // 既无交通占用（对向不避让）也可能撞机器人导航栈单次目标过远限制。
                 // 返回 null 由外层等待重试（回到图上自动恢复），超时以精准原因失败
                 waitIntents.clear(robotCode, kernelTaskId);
                 return null;
             }
-            var route = graph.plan(resolveFloorId(state, state.goal()), fromWaypoint, target.getId(), assignProperties.getNavigationMaxSpeedMps(),
+            var routeResult = graph.planFromStarts(resolveFloorId(state, state.goal()), starts, target.getId(),
+                    assignProperties.getNavigationMaxSpeedMps(),
                     // 规划约束排除自身占用：机器人驻留在自家门口路段时，不能把直连边封死（绕路 bug 修复）
                     trafficRegistry.occupiedSegmentsExcluding(robotCode),
                     // 封锁点含静止机器人驻留点（场景：死端必经点被堵 → 无路可达 → 持续等待其离开）
                     trafficRegistry.occupiedWaypointsExcluding(robotCode));
-            if (route.isEmpty()) {
+            if (routeResult.isEmpty()) {
                 // 仅用于诊断：忽略动态占用求一条静态候选路线，绝不下发或申请该路线。
-                var candidate = graph.plan(resolveFloorId(state, state.goal()), fromWaypoint, target.getId(),
+                var candidate = graph.planFromStarts(resolveFloorId(state, state.goal()), starts, target.getId(),
                         assignProperties.getNavigationMaxSpeedMps(), Set.of(), Set.of());
                 if (candidate.isEmpty()) {
                     state.staticRouteUnreachable = true;
                     waitIntents.clear(robotCode, kernelTaskId);
                     return null;
                 }
-                waitIntents.record(robotCode, kernelTaskId, candidate.get().segments().stream()
-                        .map(NavigationRouteSegmentIdMapper::id).toList(), Set.copyOf(candidate.get().waypointIds()));
+                NavigationRoute candidateRoute = candidate.get().route();
+                waitIntents.record(robotCode, kernelTaskId, candidateRoute.segments().stream()
+                        .map(NavigationRouteSegmentIdMapper::id).toList(), Set.copyOf(candidateRoute.waypointIds()));
                 continue;
             }
-            List<String> segmentIds = route.get().segments().stream()
+            NavigationRoute route = routeResult.get().route();
+            List<String> segmentIds = route.segments().stream()
                     .map(NavigationRouteSegmentIdMapper::id)
                     .toList();
             // 途经点全量持有（不只目标点）：路线租约必须覆盖全部途经点——
             // 否则其他机器人可以把"我的途经点"当目标申请成功，两车对同一交点汇合相撞；
             // 身后点随行进 releaseBehind 渐进释放，不会过度锁路
             if (trafficRegistry.tryAcquire(robotCode, segmentIds,
-                    new java.util.HashSet<>(route.get().waypointIds()),
+                    new java.util.HashSet<>(route.waypointIds()),
                     Duration.ofMinutes(30))) {
                 waitIntents.clear(robotCode, kernelTaskId);
-                return NavigationLease.ofRoute(route.get().waypointIds(), route.get().segments());
+                return NavigationLease.ofRoute(route.waypointIds(), route.segments());
             }
             // 路线点和段都可能被占，检测时重新解析实际占用者。
-            waitIntents.record(robotCode, kernelTaskId, segmentIds, Set.copyOf(route.get().waypointIds()));
+            waitIntents.record(robotCode, kernelTaskId, segmentIds, Set.copyOf(route.waypointIds()));
             return null;
         }
         return null;
-    }
-
-    /** 段两端点中离机器人较近者（路段中间起步的规划起点）。 */
-    private String nearerSegmentEndpoint(KernelTaskState state, String robotCode,
-            com.zioneer.robotscheduler.core.routing.NavigationGraph.SegmentEdge edge) {
-        var graph = boundGraph(state).orElse(null);
-        if (graph == null) {
-            return edge.fromWaypointId();
-        }
-        String floorId = resolveFloorId(state, state.goal());
-        var from = graph.waypoint(floorId, edge.fromWaypointId()).orElse(null);
-        var to = graph.waypoint(floorId, edge.toWaypointId()).orElse(null);
-        if (from == null || to == null) {
-            return edge.fromWaypointId();
-        }
-        double x = latestRobotX(robotCode);
-        double y = latestRobotY(robotCode);
-        return Math.hypot(from.getX() - x, from.getY() - y) <= Math.hypot(to.getX() - x, to.getY() - y)
-                ? edge.fromWaypointId() : edge.toWaypointId();
     }
 
     private java.util.Optional<NavigationGraph> boundGraph(KernelTaskState state) {

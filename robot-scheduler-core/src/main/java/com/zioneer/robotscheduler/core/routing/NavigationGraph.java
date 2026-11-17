@@ -316,6 +316,86 @@ public class NavigationGraph {
         return filtered;
     }
 
+    /** 多起点规划候选：起点 waypoint + 接入代价（秒，机器人实际位置到该起点的折算耗时）。 */
+    public record StartOption(String waypointId, double approachSeconds) {
+    }
+
+    /** 多起点规划结果：选中路线 + 选中起点及其接入代价；totalSeconds 为候选间比较口径。 */
+    public record MultiStartRoute(NavigationRoute route, String startWaypointId, double approachSeconds) {
+
+        public double totalSeconds() {
+            return approachSeconds + route.etaSeconds();
+        }
+    }
+
+    /**
+     * 多起点规划：对每个候选起点独立规划，按 接入代价 + 路线 ETA 取总代价最小者。
+     *
+     * <p>场景：机器人在路段中间时两端点皆为合法起点——修复"就近端点起步、
+     * 实际总路程反而更长"的回头路问题（等价于 RMF 多起点规划 / OpenTCS 反向缓存 argmin）。
+     * 图规模为百点级，逐起点 Dijkstra 总耗时可忽略，无需虚拟源点/反向缓存优化。</p>
+     */
+    public Optional<MultiStartRoute> planFromStarts(String floorId, List<StartOption> starts,
+                                                    String toWaypointId, double robotMaxSpeed,
+                                                    Set<String> blockedSegmentIds, Set<String> blockedWaypointIds) {
+        if (starts == null || starts.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!Double.isFinite(robotMaxSpeed) || robotMaxSpeed <= 0) {
+            throw new IllegalArgumentException("robotMaxSpeed must be finite and positive");
+        }
+        MultiStartRoute best = null;
+        for (StartOption start : starts) {
+            if (start == null || start.waypointId() == null) {
+                continue;
+            }
+            Optional<NavigationRoute> route = plan(floorId, start.waypointId(), toWaypointId,
+                    robotMaxSpeed, blockedSegmentIds, blockedWaypointIds);
+            if (route.isEmpty()) {
+                continue;
+            }
+            MultiStartRoute candidate = new MultiStartRoute(route.get(), start.waypointId(), start.approachSeconds());
+            if (best == null || candidate.totalSeconds() < best.totalSeconds()) {
+                best = candidate;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * 由吸附结果构建规划起点候选：
+     * 命中点位 → 单起点（接入代价 0——吸附语义即"机器人已在点上"，保持驻留占用语义）；
+     * 命中路段 → 两端点皆为候选（接入代价 = 机器人到端点距离 / 段有效速度；直线段精确，曲线段近似）；
+     * 均未命中 → 空（离图等待回图，不放宽）。
+     */
+    public List<StartOption> startOptionsFrom(String floorId, GraphAttachment attachment,
+                                              double robotX, double robotY, double robotMaxSpeed) {
+        if (attachment == null || !attachment.attached()) {
+            return List.of();
+        }
+        if (attachment.waypointId() != null) {
+            return List.of(new StartOption(attachment.waypointId(), 0));
+        }
+        return segmentEdge(floorId, attachment.segmentId())
+                .map(edge -> {
+                    WaypointMetadata from = waypoint(floorId, edge.fromWaypointId()).orElse(null);
+                    WaypointMetadata to = waypoint(floorId, edge.toWaypointId()).orElse(null);
+                    if (from == null || to == null) {
+                        return List.<StartOption>of();
+                    }
+                    double effectiveSpeed = Math.min(edge.maxSpeed(), robotMaxSpeed);
+                    if (effectiveSpeed <= 0) {
+                        return List.<StartOption>of();
+                    }
+                    return List.of(
+                            new StartOption(from.getId(),
+                                    Math.hypot(robotX - from.getX(), robotY - from.getY()) / effectiveSpeed),
+                            new StartOption(to.getId(),
+                                    Math.hypot(robotX - to.getX(), robotY - to.getY()) / effectiveSpeed));
+                })
+                .orElseGet(List::of);
+    }
+
     /**
      * 位置吸附：优先 waypoint（阈值内），否则路径段垂距吸附。
      */

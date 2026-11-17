@@ -202,6 +202,75 @@ class NavigationGraphTest {
         }
     }
 
+    // ==================== 多起点规划（路段中间起步，回头路修复） ====================
+
+    // 场景：机器人在 A-B 段中间（小点位阈值吸附为路段）；预期：两端点皆为候选，接入代价=欧氏距离/段有效速度
+    @Test
+    void startOptionsFrom_midSegment_returnsBothEndpoints() {
+        GraphAttachment attachment = graph.attach("F1", 0.6, 0.2, 0.5, 1.0);
+
+        List<NavigationGraph.StartOption> starts = graph.startOptionsFrom("F1", attachment, 0.6, 0.2, 1.0);
+
+        assertThat(starts).extracting(NavigationGraph.StartOption::waypointId)
+                .containsExactlyInAnyOrder("WP_A", "WP_B");
+        // 段限速 0.8（PATH_AB）：A 接入 = sqrt(0.4²+0.2²)/0.8 ≈ 0.7906s；B 接入 = sqrt(2.4²+0.2²)/0.8 ≈ 3.0104s
+        org.assertj.core.data.Offset<Double> eps = org.assertj.core.api.Assertions.within(1e-4);
+        assertThat(starts.get(0).approachSeconds()).isEqualTo(0.6324555 / 0.8, eps);
+        assertThat(starts.get(1).approachSeconds()).isEqualTo(2.4083189 / 0.8, eps);
+    }
+
+    // 场景：机器人段中间更靠近 A，但目标在 C 侧——B 起步总代价更小；
+    // 预期：选 B 起步（近端 A 起步要走回头路，总路程反而更长——旧 nearerSegmentEndpoint 行为）
+    @Test
+    void planFromStarts_midSegment_picksLowerTotalCostEndpoint() {
+        GraphAttachment attachment = graph.attach("F1", 0.6, 0.2, 0.5, 1.0);
+        List<NavigationGraph.StartOption> starts = graph.startOptionsFrom("F1", attachment, 0.6, 0.2, 1.0);
+
+        Optional<NavigationGraph.MultiStartRoute> best =
+                graph.planFromStarts("F1", starts, "WP_C", 1.0, null, null);
+
+        assertThat(best).isPresent();
+        assertThat(best.get().startWaypointId()).isEqualTo("WP_B");
+        assertThat(best.get().route().waypointIds()).containsExactly("WP_B", "WP_C");
+        // B 候选总代价 = 接入 3.0104s + 路线 B→C 3s = 6.0104s < A 候选 0.7906 + 6.75 = 7.5406s
+        assertThat(best.get().totalSeconds()).isEqualTo(2.4083189 / 0.8 + 3.0,
+                org.assertj.core.api.Assertions.within(1e-4));
+    }
+
+    // 场景：吸附命中点位（驻留语义）；预期：单起点候选且接入代价为 0，规划结果与单起点 plan 一致
+    @Test
+    void startOptionsFrom_onWaypoint_singleStartWithZeroApproach() {
+        GraphAttachment attachment = graph.attach("F1", 0.4, 0.0, 3.0, 1.0);
+
+        List<NavigationGraph.StartOption> starts = graph.startOptionsFrom("F1", attachment, 0.4, 0.0, 1.0);
+
+        assertThat(starts).hasSize(1);
+        assertThat(starts.get(0).waypointId()).isEqualTo("WP_A");
+        assertThat(starts.get(0).approachSeconds()).isZero();
+        Optional<NavigationGraph.MultiStartRoute> best =
+                graph.planFromStarts("F1", starts, "WP_C", 1.0, null, null);
+        assertThat(best).isPresent();
+        assertThat(best.get().startWaypointId()).isEqualTo("WP_A");
+        assertThat(best.get().route().waypointIds()).containsExactly("WP_A", "WP_B", "WP_C");
+    }
+
+    // 场景：离图（吸附失败）；预期：起点候选为空、多起点规划返回空（等待回图，不放宽）
+    @Test
+    void startOptionsFrom_offGraph_returnsEmptyCandidates() {
+        GraphAttachment attachment = graph.attach("F1", 50.0, 50.0, 3.0, 1.0);
+
+        assertThat(graph.startOptionsFrom("F1", attachment, 50.0, 50.0, 1.0)).isEmpty();
+        assertThat(graph.planFromStarts("F1", List.of(), "WP_C", 1.0, null, null)).isEmpty();
+    }
+
+    // 场景：候选起点全部不可达目标（D→E 单向，E 无法回到 D）；预期：整体返回空
+    @Test
+    void planFromStarts_allStartsUnreachable_returnsEmpty() {
+        List<NavigationGraph.StartOption> starts = List.of(new NavigationGraph.StartOption("WP_E", 0));
+
+        assertThat(graph.planFromStarts("F1", starts, "WP_D", 1.0, null, null)).isEmpty();
+    }
+
     // ==================== 测试地图构建 ====================
 
     private MapMetadata buildMap() {
